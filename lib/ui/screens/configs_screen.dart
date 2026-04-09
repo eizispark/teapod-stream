@@ -1,0 +1,728 @@
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/models/vpn_config.dart';
+import '../../core/services/config_storage_service.dart';
+import '../../protocols/xray/vless_parser.dart';
+import '../../providers/config_provider.dart';
+import '../../providers/vpn_provider.dart';
+import '../../core/interfaces/vpn_engine.dart';
+import '../theme/app_colors.dart';
+import '../widgets/config_card.dart';
+import 'add_config_screen.dart';
+
+class ConfigsScreen extends ConsumerStatefulWidget {
+  const ConfigsScreen({super.key});
+
+  @override
+  ConsumerState<ConfigsScreen> createState() => _ConfigsScreenState();
+}
+
+class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
+  final Set<String> _expandedSubs = {};
+
+  @override
+  Widget build(BuildContext context) {
+    final configStateAsync = ref.watch(configProvider);
+    final vpnState = ref.watch(vpnProvider);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Конфигурации'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.add_rounded),
+            onPressed: () => _openAddConfig(context),
+          ),
+        ],
+      ),
+      body: configStateAsync.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, _) => Center(child: Text('Ошибка: $e')),
+        data: (configState) {
+          if (configState.configs.isEmpty && configState.subscriptions.isEmpty) {
+            return _EmptyState(onAdd: () => _openAddConfig(context));
+          }
+          return ListView.separated(
+            padding: const EdgeInsets.all(16),
+            itemCount: configState.subscriptions.length + (configState.standaloneConfigs.isNotEmpty ? 1 : 0),
+            separatorBuilder: (_, _) => const SizedBox(height: 16),
+            itemBuilder: (context, i) {
+              if (i < configState.subscriptions.length) {
+                final sub = configState.subscriptions[i];
+                final subConfigs = configState.configsBySubscription[sub.id] ?? [];
+                final isExpanded = _expandedSubs.contains(sub.id);
+                return _SubscriptionGroup(
+                  subscription: sub,
+                  configs: subConfigs,
+                  activeConfigId: configState.activeConfigId,
+                  isExpanded: isExpanded,
+                  vpnState: vpnState.connectionState,
+                  onToggle: () => setState(() {
+                    if (isExpanded) {
+                      _expandedSubs.remove(sub.id);
+                    } else {
+                      _expandedSubs.add(sub.id);
+                    }
+                  }),
+                  onRefresh: () => _refreshSubscription(context, ref, sub),
+                  onRename: () => _renameSubscription(context, ref, sub),
+                  onEditUrl: () => _editSubscriptionUrl(context, ref, sub),
+                  onDelete: () => _deleteSubscription(context, ref, sub),
+                  onSelectConfig: (config) => _selectConfig(ref, config),
+                  onConfigLongPress: (config) => _showConfigMenu(context, ref, config),
+                );
+              }
+              return _StandaloneSection(
+                configs: configState.standaloneConfigs,
+                activeConfigId: configState.activeConfigId,
+                vpnState: vpnState.connectionState,
+                onSelectConfig: (config) => _selectConfig(ref, config),
+                onConfigLongPress: (config) => _showConfigMenu(context, ref, config),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  void _selectConfig(WidgetRef ref, VpnConfig config) {
+    ref.read(configProvider.notifier).setActiveConfig(config.id);
+  }
+
+  Future<void> _showConfigMenu(
+    BuildContext context, WidgetRef ref, VpnConfig config) async {
+    final items = <PopupMenuEntry<String>>[
+      const PopupMenuItem(value: 'rename', child: _MenuRow(Icons.edit_rounded, 'Переименовать')),
+      const PopupMenuItem(value: 'edit', child: _MenuRow(Icons.code_rounded, 'Редактировать URI')),
+      const PopupMenuDivider(),
+      const PopupMenuItem(value: 'copy', child: _MenuRow(Icons.copy_rounded, 'Копировать URL')),
+      const PopupMenuItem(value: 'share', child: _MenuRow(Icons.share_rounded, 'Поделиться')),
+      const PopupMenuDivider(),
+      const PopupMenuItem(value: 'delete', child: _MenuRow(Icons.delete_rounded, 'Удалить', color: AppColors.error)),
+    ];
+
+    final result = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        MediaQuery.of(context).size.width - 200,
+        MediaQuery.of(context).padding.top + kToolbarHeight + 56,
+        20,
+        0,
+      ),
+      items: items,
+      color: AppColors.surfaceElevated,
+    );
+
+    if (result == null) return;
+    switch (result) {
+      case 'rename':
+        await _renameConfig(context, ref, config);
+        break;
+      case 'edit':
+        await _editConfig(context, ref, config);
+        break;
+      case 'copy':
+      case 'share':
+        if (config.rawUri != null) {
+          await Clipboard.setData(ClipboardData(text: config.rawUri!));
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('URL скопирован'), duration: Duration(seconds: 1)),
+            );
+          }
+        }
+        break;
+      case 'delete':
+        await _deleteConfig(context, ref, config);
+        break;
+    }
+  }
+
+  Future<void> _renameConfig(
+    BuildContext context, WidgetRef ref, VpnConfig config) async {
+    final controller = TextEditingController(text: config.name);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceElevated,
+        title: const Text('Переименовать'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Имя',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Сохранить', style: TextStyle(color: AppColors.primary)),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && controller.text.trim().isNotEmpty) {
+      final updated = config.copyWith(name: controller.text.trim());
+      ref.read(configProvider.notifier).updateConfig(updated);
+    }
+  }
+
+  Future<void> _editConfig(
+    BuildContext context, WidgetRef ref, VpnConfig config) async {
+    final controller = TextEditingController(text: config.rawUri ?? '');
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceElevated,
+        title: const Text('Редактировать URI'),
+        content: SizedBox(
+          width: MediaQuery.of(context).size.width * 0.8,
+          child: TextField(
+            controller: controller,
+            maxLines: 5,
+            keyboardType: TextInputType.multiline,
+            decoration: const InputDecoration(
+              hintText: 'vless://...',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Сохранить', style: TextStyle(color: AppColors.primary)),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && controller.text.trim().isNotEmpty) {
+      final updated = VlessParser.parseUri(controller.text.trim());
+      if (updated != null) {
+        final renamed = VpnConfig(
+          id: config.id,
+          name: updated.name,
+          protocol: updated.protocol,
+          address: updated.address,
+          port: updated.port,
+          uuid: updated.uuid,
+          security: updated.security,
+          transport: updated.transport,
+          sni: updated.sni,
+          wsPath: updated.wsPath,
+          wsHost: updated.wsHost,
+          grpcServiceName: updated.grpcServiceName,
+          publicKey: updated.publicKey,
+          shortId: updated.shortId,
+          spiderX: updated.spiderX,
+          flow: updated.flow,
+          encryption: updated.encryption,
+          createdAt: config.createdAt,
+          rawUri: controller.text.trim(),
+          latencyMs: config.latencyMs,
+          subscriptionId: config.subscriptionId,
+        );
+        ref.read(configProvider.notifier).updateConfig(renamed);
+      } else if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Не удалось распознать URI')),
+        );
+      }
+    }
+  }
+
+  Future<void> _deleteConfig(
+    BuildContext context, WidgetRef ref, VpnConfig config) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceElevated,
+        title: const Text('Удалить?'),
+        content: Text('Конфигурация "${config.name}" будет удалена.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.error),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      ref.read(configProvider.notifier).removeConfig(config.id);
+    }
+  }
+
+  Future<void> _refreshSubscription(
+    BuildContext context, WidgetRef ref, Subscription sub) async {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+
+    try {
+      await ref.read(configProvider.notifier).addSubscriptionFromUrl(sub.url, name: sub.name);
+      if (context.mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Подписка обновлена')),
+        );
+      }
+    } catch (e) {
+      if (context.mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Ошибка обновления: $e')),
+        );
+      }
+    }
+  }
+
+  Future<void> _renameSubscription(
+    BuildContext context, WidgetRef ref, Subscription sub) async {
+    final controller = TextEditingController(text: sub.name);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceElevated,
+        title: const Text('Переименовать подписку'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          decoration: const InputDecoration(
+            labelText: 'Имя',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Сохранить', style: TextStyle(color: AppColors.primary)),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && controller.text.trim().isNotEmpty) {
+      final updated = sub.copyWith(name: controller.text.trim());
+      await ConfigNotifier.storage.updateSubscription(updated);
+      final current = ref.read(configProvider).maybeWhen(data: (d) => d, orElse: () => null);
+      if (current != null) {
+        ref.read(configProvider.notifier).state = AsyncData(
+          current.copyWith(
+            subscriptions: current.subscriptions.map((s) => s.id == sub.id ? updated : s).toList(),
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _editSubscriptionUrl(
+    BuildContext context, WidgetRef ref, Subscription sub) async {
+    final controller = TextEditingController(text: sub.url);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceElevated,
+        title: const Text('Изменить URL подписки'),
+        content: SizedBox(
+          width: MediaQuery.of(context).size.width * 0.8,
+          child: TextField(
+            controller: controller,
+            maxLines: 3,
+            keyboardType: TextInputType.url,
+            decoration: const InputDecoration(
+              labelText: 'URL',
+              hintText: 'https://...',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Сохранить и обновить', style: TextStyle(color: AppColors.primary)),
+          ),
+        ],
+      ),
+    );
+    if (ok == true && controller.text.trim().isNotEmpty) {
+      // Update subscription URL and re-fetch
+      final updatedUrl = controller.text.trim();
+      // Remove old configs
+      await ConfigNotifier.storage.removeSubscription(sub.id);
+      // Re-add with new URL
+      try {
+        await ref.read(configProvider.notifier).addSubscriptionFromUrl(updatedUrl, name: sub.name);
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Подписка обновлена по новому URL')),
+          );
+        }
+      } catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Ошибка обновления: $e')),
+          );
+        }
+      }
+    }
+  }
+
+  Future<void> _deleteSubscription(
+    BuildContext context, WidgetRef ref, Subscription sub) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppColors.surfaceElevated,
+        title: const Text('Удалить подписку?'),
+        content: Text('Подписка "${sub.name}" и все её конфигурации будут удалены.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            style: TextButton.styleFrom(foregroundColor: AppColors.error),
+            child: const Text('Удалить'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      ref.read(configProvider.notifier).removeSubscription(sub.id);
+    }
+  }
+
+  void _openAddConfig(BuildContext context) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => const AddConfigScreen()),
+    );
+  }
+}
+
+// ─── Subscription Group ─────────────────────────────────────────
+
+class _SubscriptionGroup extends StatelessWidget {
+  final Subscription subscription;
+  final List<VpnConfig> configs;
+  final String? activeConfigId;
+  final bool isExpanded;
+  final VpnState vpnState;
+  final VoidCallback onToggle;
+  final VoidCallback onRefresh;
+  final VoidCallback onRename;
+  final VoidCallback onEditUrl;
+  final VoidCallback onDelete;
+  final void Function(VpnConfig) onSelectConfig;
+  final void Function(VpnConfig) onConfigLongPress;
+
+  const _SubscriptionGroup({
+    required this.subscription,
+    required this.configs,
+    required this.activeConfigId,
+    required this.isExpanded,
+    required this.vpnState,
+    required this.onToggle,
+    required this.onRefresh,
+    required this.onRename,
+    required this.onEditUrl,
+    required this.onDelete,
+    required this.onSelectConfig,
+    required this.onConfigLongPress,
+  });
+
+  String get _lastRefresh {
+    final at = subscription.lastFetchedAt;
+    if (at == null) return 'Не обновлялась';
+    final diff = DateTime.now().difference(at);
+    if (diff.inMinutes < 1) return 'Только что';
+    if (diff.inHours < 1) return '${diff.inMinutes} мин назад';
+    if (diff.inDays < 1) return '${diff.inHours} ч назад';
+    return '${diff.inDays} д назад';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Header
+        GestureDetector(
+          onTap: onToggle,
+          onLongPress: () => _showSubSubMenu(context),
+          child: Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppColors.surface,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppColors.border),
+            ),
+            child: Row(
+              children: [
+                Icon(
+                  isExpanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+                  color: AppColors.textSecondary,
+                  size: 20,
+                ),
+                const SizedBox(width: 8),
+                const Icon(Icons.rss_feed_rounded, color: AppColors.primary, size: 20),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        subscription.name,
+                        style: const TextStyle(
+                          color: AppColors.textPrimary,
+                          fontWeight: FontWeight.w600,
+                          fontSize: 14,
+                        ),
+                      ),
+                      Text(
+                        '${configs.length} конф. • $_lastRefresh',
+                        style: const TextStyle(
+                          color: AppColors.textSecondary,
+                          fontSize: 11,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                _SubAction(Icons.refresh_rounded, onRefresh),
+                const SizedBox(width: 4),
+                _SubAction(Icons.more_vert_rounded, () => _showSubSubMenu(context)),
+              ],
+            ),
+          ),
+        ),
+        // Configs
+        if (isExpanded) ...[
+          const SizedBox(height: 8),
+          ...configs.map((c) {
+            final isActive = c.id == activeConfigId;
+            final isConnected = vpnState == VpnState.connected && isActive;
+            return Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: ConfigCard(
+                config: c,
+                isActive: isActive,
+                isConnected: isConnected,
+                onTap: () => onSelectConfig(c),
+                onLongPress: () => onConfigLongPress(c),
+              ),
+            );
+          }),
+        ],
+      ],
+    );
+  }
+
+  Future<void> _showSubSubMenu(BuildContext context) async {
+    final result = await showMenu<String>(
+      context: context,
+      position: RelativeRect.fromLTRB(
+        MediaQuery.of(context).size.width - 220,
+        MediaQuery.of(context).padding.top + kToolbarHeight,
+        20,
+        0,
+      ),
+      items: const [
+        PopupMenuItem(value: 'rename', child: _MenuRow(Icons.edit_rounded, 'Переименовать')),
+        PopupMenuItem(value: 'edit_url', child: _MenuRow(Icons.link_rounded, 'Изменить URL')),
+        PopupMenuDivider(),
+        PopupMenuItem(value: 'copy_url', child: _MenuRow(Icons.copy_rounded, 'Копировать URL')),
+        PopupMenuDivider(),
+        PopupMenuItem(value: 'refresh', child: _MenuRow(Icons.refresh_rounded, 'Обновить')),
+        PopupMenuItem(value: 'delete', child: _MenuRow(Icons.delete_rounded, 'Удалить', color: AppColors.error)),
+      ],
+      color: AppColors.surfaceElevated,
+    );
+
+    switch (result) {
+      case 'rename': onRename(); break;
+      case 'edit_url': onEditUrl(); break;
+      case 'copy_url':
+        await Clipboard.setData(ClipboardData(text: subscription.url));
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('URL скопирован'), duration: Duration(seconds: 1)),
+          );
+        }
+        break;
+      case 'refresh': onRefresh(); break;
+      case 'delete': onDelete(); break;
+    }
+  }
+}
+
+class _SubAction extends StatelessWidget {
+  final IconData icon;
+  final VoidCallback onTap;
+  const _SubAction(this.icon, this.onTap);
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(6),
+        decoration: BoxDecoration(
+          color: AppColors.surfaceHighlight,
+          borderRadius: BorderRadius.circular(6),
+        ),
+        child: Icon(icon, size: 16, color: AppColors.textSecondary),
+      ),
+    );
+  }
+}
+
+// ─── Standalone Section ─────────────────────────────────────────
+
+class _StandaloneSection extends StatelessWidget {
+  final List<VpnConfig> configs;
+  final String? activeConfigId;
+  final VpnState vpnState;
+  final void Function(VpnConfig) onSelectConfig;
+  final void Function(VpnConfig) onConfigLongPress;
+
+  const _StandaloneSection({
+    required this.configs,
+    required this.activeConfigId,
+    required this.vpnState,
+    required this.onSelectConfig,
+    required this.onConfigLongPress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Padding(
+          padding: EdgeInsets.only(left: 4, bottom: 8),
+          child: Text(
+            'Отдельные конфигурации',
+            style: TextStyle(
+              color: AppColors.textSecondary,
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 1,
+            ),
+          ),
+        ),
+        ...configs.map((c) {
+          final isActive = c.id == activeConfigId;
+          final isConnected = vpnState == VpnState.connected && isActive;
+          return Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: ConfigCard(
+              config: c,
+              isActive: isActive,
+              isConnected: isConnected,
+              onTap: () => onSelectConfig(c),
+              onLongPress: () => onConfigLongPress(c),
+            ),
+          );
+        }),
+      ],
+    );
+  }
+}
+
+// ─── Helpers ────────────────────────────────────────────────────
+
+class _MenuRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color? color;
+  const _MenuRow(this.icon, this.label, {this.color});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 20, color: color ?? AppColors.textPrimary),
+        const SizedBox(width: 12),
+        Text(label, style: TextStyle(color: color ?? AppColors.textPrimary)),
+      ],
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  final VoidCallback onAdd;
+  const _EmptyState({required this.onAdd});
+
+  @override
+  Widget build(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 80,
+            height: 80,
+            decoration: BoxDecoration(
+              color: AppColors.surfaceElevated,
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.vpn_key_outlined,
+              color: AppColors.textDisabled,
+              size: 36,
+            ),
+          ),
+          const SizedBox(height: 20),
+          const Text(
+            'Нет конфигураций',
+            style: TextStyle(
+              color: AppColors.textPrimary,
+              fontSize: 18,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+          const SizedBox(height: 8),
+          const Text(
+            'Добавьте конфигурацию или подписку\nдля подключения',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: AppColors.textSecondary),
+          ),
+          const SizedBox(height: 28),
+          ElevatedButton.icon(
+            onPressed: onAdd,
+            icon: const Icon(Icons.add_rounded),
+            label: const Text('Добавить'),
+          ),
+        ],
+      ),
+    );
+  }
+}

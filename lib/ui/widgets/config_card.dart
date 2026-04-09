@@ -1,0 +1,198 @@
+import 'package:flutter/material.dart';
+import '../../core/models/vpn_config.dart';
+import '../theme/app_colors.dart';
+
+class ConfigCard extends StatelessWidget {
+  final VpnConfig config;
+  final bool isActive;
+  final bool isConnected;
+  final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
+
+  const ConfigCard({
+    super.key,
+    required this.config,
+    this.isActive = false,
+    this.isConnected = false,
+    this.onTap,
+    this.onLongPress,
+  });
+
+  Color get _protocolColor => switch (config.protocol) {
+        VpnProtocol.vless => AppColors.primary,
+        VpnProtocol.vmess => const Color(0xFFB47FFF),
+        VpnProtocol.trojan => const Color(0xFFFF7F7F),
+        VpnProtocol.shadowsocks => const Color(0xFFFFB74D),
+      };
+
+  String get _protocolLabel => switch (config.protocol) {
+        VpnProtocol.vless => 'VLESS',
+        VpnProtocol.vmess => 'VMess',
+        VpnProtocol.trojan => 'Trojan',
+        VpnProtocol.shadowsocks => 'SS',
+      };
+
+  String get _securityLabel => switch (config.security) {
+        VpnSecurity.tls => 'TLS',
+        VpnSecurity.reality => 'Reality',
+        VpnSecurity.none => 'None',
+      };
+
+  String get _transportLabel => switch (config.transport) {
+        VpnTransport.ws => 'WS',
+        VpnTransport.grpc => 'gRPC',
+        VpnTransport.http2 => 'H2',
+        VpnTransport.quic => 'QUIC',
+        VpnTransport.tcp => 'TCP',
+      };
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      onLongPress: onLongPress,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        decoration: BoxDecoration(
+          color: isActive
+              ? AppColors.primaryDim.withValues(alpha: 0.15)
+              : AppColors.surface,
+          borderRadius: BorderRadius.circular(16),
+          border: Border.all(
+            color: isActive ? AppColors.primary : AppColors.border,
+            width: isActive ? 1.5 : 1,
+          ),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Row(
+            children: [
+              // Protocol badge
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+                decoration: BoxDecoration(
+                  color: _protocolColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: _protocolColor.withValues(alpha: 0.3),
+                  ),
+                ),
+                child: Text(
+                  _protocolLabel,
+                  style: TextStyle(
+                    color: _protocolColor,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: 0.5,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              // Info
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      config.name,
+                      style: const TextStyle(
+                        color: AppColors.textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w500,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Text(
+                          '${config.address}:${config.port}',
+                          style: const TextStyle(
+                            color: AppColors.textSecondary,
+                            fontSize: 12,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        _Tag(_securityLabel),
+                        const SizedBox(width: 4),
+                        _Tag(_transportLabel),
+                        if (config.latencyMs != null) ...[
+                          const SizedBox(width: 8),
+                          _LatencyBadge(config.latencyMs!),
+                        ],
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              // Active indicator or menu hint
+              if (isActive)
+                Icon(
+                  isConnected ? Icons.check_circle : Icons.radio_button_on,
+                  color: isConnected
+                      ? AppColors.connected
+                      : AppColors.primary,
+                  size: 20,
+                )
+              else
+                const Icon(
+                  Icons.more_vert_rounded,
+                  color: AppColors.textDisabled,
+                  size: 20,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _Tag extends StatelessWidget {
+  final String label;
+  const _Tag(this.label);
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+      decoration: BoxDecoration(
+        color: AppColors.surfaceHighlight,
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        label,
+        style: const TextStyle(
+          color: AppColors.textSecondary,
+          fontSize: 10,
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+  }
+}
+
+class _LatencyBadge extends StatelessWidget {
+  final int ms;
+  const _LatencyBadge(this.ms);
+
+  Color get _color {
+    if (ms < 100) return AppColors.connected;
+    if (ms < 300) return AppColors.connecting;
+    return AppColors.error;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      '${ms}ms',
+      style: TextStyle(
+        color: _color,
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+      ),
+    );
+  }
+}

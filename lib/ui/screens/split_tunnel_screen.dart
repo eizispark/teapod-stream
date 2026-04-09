@@ -1,0 +1,180 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/models/app_info.dart';
+import '../../providers/apps_provider.dart';
+import '../../providers/settings_provider.dart';
+import '../theme/app_colors.dart';
+
+class SplitTunnelScreen extends ConsumerStatefulWidget {
+  const SplitTunnelScreen({super.key});
+
+  @override
+  ConsumerState<SplitTunnelScreen> createState() => _SplitTunnelScreenState();
+}
+
+class _SplitTunnelScreenState extends ConsumerState<SplitTunnelScreen> {
+  String _search = '';
+
+  @override
+  Widget build(BuildContext context) {
+    final appsAsync = ref.watch(installedAppsProvider);
+    final settings = ref.watch(settingsProvider).maybeWhen(data: (d) => d, orElse: () => null);
+    final excluded = settings?.excludedPackages ?? {};
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Исключения'),
+        actions: [
+          if (excluded.isNotEmpty)
+            Center(
+              child: Container(
+                margin: const EdgeInsets.only(right: 16),
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: AppColors.primaryDim.withValues(alpha: 0.3),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Text(
+                  '${excluded.length}',
+                  style: const TextStyle(
+                    color: AppColors.primary,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+      body: Column(
+        children: [
+          // Info banner
+          Container(
+            padding: const EdgeInsets.all(14),
+            margin: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            decoration: BoxDecoration(
+              color: AppColors.surfaceElevated,
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.info_outline, color: AppColors.primary, size: 18),
+                SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'Выбранные приложения будут выходить напрямую в интернет, '
+                    'минуя VPN-туннель.',
+                    style: TextStyle(
+                      color: AppColors.textSecondary,
+                      fontSize: 13,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          // Search
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: TextField(
+              decoration: const InputDecoration(
+                hintText: 'Поиск приложений...',
+                prefixIcon: Icon(Icons.search_rounded),
+                isDense: true,
+              ),
+              onChanged: (v) => setState(() => _search = v.toLowerCase()),
+            ),
+          ),
+          const SizedBox(height: 8),
+          Expanded(
+            child: appsAsync.when(
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (e, _) => Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    const Icon(Icons.error_outline,
+                        color: AppColors.error, size: 40),
+                    const SizedBox(height: 12),
+                    Text('Не удалось загрузить приложения: $e'),
+                  ],
+                ),
+              ),
+              data: (apps) {
+                final filtered = _search.isEmpty
+                    ? apps
+                    : apps
+                        .where((a) =>
+                            a.appName.toLowerCase().contains(_search) ||
+                            a.packageName.toLowerCase().contains(_search))
+                        .toList();
+
+                return ListView.builder(
+                  padding: const EdgeInsets.only(bottom: 24),
+                  itemCount: filtered.length,
+                  itemBuilder: (context, i) {
+                    final app = filtered[i];
+                    final isExcluded = excluded.contains(app.packageName);
+                    return _AppListTile(
+                      app: app.copyWith(isExcluded: isExcluded),
+                      onToggle: () => ref
+                          .read(settingsProvider.notifier)
+                          .toggleExcludedPackage(app.packageName),
+                    );
+                  },
+                );
+              },
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _AppListTile extends StatelessWidget {
+  final AppInfo app;
+  final VoidCallback onToggle;
+
+  const _AppListTile({required this.app, required this.onToggle});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      title: Text(
+        app.appName,
+        style: TextStyle(
+          color: app.isExcluded ? AppColors.textPrimary : AppColors.textSecondary,
+          fontWeight:
+              app.isExcluded ? FontWeight.w500 : FontWeight.normal,
+        ),
+      ),
+      subtitle: Text(
+        app.packageName,
+        style: const TextStyle(fontSize: 11, color: AppColors.textDisabled),
+      ),
+      leading: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          color: app.isExcluded
+              ? AppColors.error.withValues(alpha: 0.1)
+              : AppColors.surfaceHighlight,
+          borderRadius: BorderRadius.circular(10),
+        ),
+        child: Icon(
+          app.isExcluded
+              ? Icons.do_not_disturb_on_outlined
+              : Icons.apps_rounded,
+          color: app.isExcluded ? AppColors.error : AppColors.textDisabled,
+          size: 20,
+        ),
+      ),
+      trailing: Switch(
+        value: app.isExcluded,
+        onChanged: (_) => onToggle(),
+      ),
+      onTap: onToggle,
+    );
+  }
+}
