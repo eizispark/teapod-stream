@@ -35,6 +35,7 @@ class _AppShell extends ConsumerStatefulWidget {
 
 class _AppShellState extends ConsumerState<_AppShell> {
   int _currentIndex = 0;
+  bool _autoConnectAttempted = false;
 
   static const _pages = [
     HomeScreen(),
@@ -46,10 +47,18 @@ class _AppShellState extends ConsumerState<_AppShell> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _tryAutoConnect());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_autoConnectAttempted) return;
+      _autoConnectAttempted = true;
+      _tryAutoConnect();
+    });
   }
 
   Future<void> _tryAutoConnect() async {
+    // Give providers time to initialize
+    await Future.delayed(const Duration(milliseconds: 300));
+    if (!mounted) return;
+
     final settings = ref.read(settingsProvider).maybeWhen(
       data: (d) => d,
       orElse: () => null,

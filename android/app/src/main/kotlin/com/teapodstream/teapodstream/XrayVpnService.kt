@@ -179,7 +179,11 @@ class XrayVpnService : VpnService() {
             // 2. Start tun2socks using native fork+exec so the TUN fd is properly inherited.
             // Java's ProcessBuilder closes all non-stdio fds in the child; native fork bypasses that.
             val tun2socksBin = File(applicationInfo.nativeLibraryDir, "libtun2socks.so")
-            val proxyUrl = "socks5://$socksUser:$socksPassword@127.0.0.1:$socksPort"
+            val proxyUrl = if (socksUser.isNotEmpty()) {
+                "socks5://$socksUser:$socksPassword@127.0.0.1:$socksPort"
+            } else {
+                "socks5://127.0.0.1:$socksPort"
+            }
             val t2sArgs = arrayOf(
                 tun2socksBin.absolutePath,
                 "-device", "fd://$tunFd",

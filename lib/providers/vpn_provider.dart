@@ -91,8 +91,12 @@ class VpnNotifier extends Notifier<VpnState2> {
 
     final settings = ref.read(settingsProvider).maybeWhen(data: (d) => d, orElse: () => null) ?? const AppSettings();
 
-    // Generate fresh credentials for each connection
-    _socksCredentials = XrayEngine.generateSocksCredentials();
+    // Generate credentials
+    if (settings.randomCredentials) {
+      _socksCredentials = XrayEngine.generateSocksCredentials();
+    } else {
+      _socksCredentials = (user: '', password: '');
+    }
 
     // Use random port or configured port
     final actualSocksPort = settings.randomPort
@@ -108,6 +112,9 @@ class VpnNotifier extends Notifier<VpnState2> {
           ? settings.excludedPackages
           : {},
       logLevel: settings.logLevel,
+      enableUdp: settings.enableUdp,
+      dnsMode: settings.dnsMode,
+      dnsServer: settings.dnsServer,
     );
 
     await _engine.connect(config, options);

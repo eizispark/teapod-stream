@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:url_launcher/url_launcher.dart';
+import '../../core/models/dns_config.dart';
 import '../../core/services/settings_service.dart';
 import '../../providers/settings_provider.dart';
 import '../../providers/vpn_provider.dart';
@@ -153,14 +154,27 @@ class _SettingsBodyState extends State<_SettingsBody> {
                   : (v) => widget.onUpdate(
                       widget.settings.copyWith(autoConnect: v)),
             ),
-            const _Divider(),
+          ],
+        ),
+        if (widget.isConnected) ...[
+          const SizedBox(height: 6),
+          const _DisabledNote('Настройки нельзя изменить во время подключения'),
+        ],
+
+        const SizedBox(height: 20),
+
+        // Xray section
+        _SectionHeader('Xray'),
+        const SizedBox(height: 8),
+        _SettingsCard(
+          children: [
             SwitchListTile(
               title: const Text(
                 'Случайный порт',
                 style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
               ),
               subtitle: const Text(
-                'Использовать случайный порт при каждом подключении',
+                'Случайный SOCKS порт при каждом подключении',
                 style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
               ),
               value: widget.settings.randomPort,
@@ -179,11 +193,90 @@ class _SettingsBodyState extends State<_SettingsBody> {
                 onChanged: (_) => _updatePorts(),
               ),
             ],
+            const _Divider(),
+            SwitchListTile(
+              title: const Text(
+                'Случайные учётные данные',
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
+              ),
+              subtitle: const Text(
+                'Генерировать случайный логин/пароль SOCKS',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+              ),
+              value: widget.settings.randomCredentials,
+              onChanged: widget.isConnected
+                  ? null
+                  : (v) => widget.onUpdate(
+                      widget.settings.copyWith(randomCredentials: v)),
+            ),
+            const _Divider(),
+            SwitchListTile(
+              title: const Text(
+                'UDP',
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
+              ),
+              subtitle: const Text(
+                'Разрешить UDP-трафик через SOCKS',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+              ),
+              value: widget.settings.enableUdp,
+              onChanged: widget.isConnected
+                  ? null
+                  : (v) => widget.onUpdate(
+                      widget.settings.copyWith(enableUdp: v)),
+            ),
+            const _Divider(),
+            ListTile(
+              title: const Text(
+                'Режим DNS',
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
+              ),
+              subtitle: Text(
+                widget.settings.dnsMode == DnsMode.proxy
+                    ? 'DNS запросы через VPN-туннель'
+                    : 'DNS запросы напрямую',
+                style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
+              ),
+              trailing: DropdownButton<DnsMode>(
+                value: widget.settings.dnsMode,
+                dropdownColor: AppColors.surfaceElevated,
+                style: const TextStyle(color: AppColors.textPrimary),
+                underline: const SizedBox(),
+                items: DnsMode.values.map((m) => DropdownMenuItem(
+                  value: m,
+                  child: Text(m == DnsMode.proxy ? 'Через VPN' : 'Напрямую',
+                      style: const TextStyle(fontSize: 13)),
+                )).toList(),
+                onChanged: widget.isConnected
+                    ? null
+                    : (v) => v != null
+                        ? widget.onUpdate(widget.settings.copyWith(dnsMode: v))
+                        : null,
+              ),
+            ),
+            const _Divider(),
+            ListTile(
+              title: const Text(
+                'DNS сервер',
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
+              ),
+              subtitle: Text(
+                _dnsLabel(widget.settings),
+                style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
+              ),
+              trailing: const Icon(Icons.chevron_right_rounded, color: AppColors.textSecondary),
+              onTap: widget.isConnected
+                  ? null
+                  : () => Navigator.push(
+                        context,
+                        MaterialPageRoute(builder: (_) => const _DnsSettingsScreen()),
+                      ),
+            ),
           ],
         ),
         if (widget.isConnected) ...[
           const SizedBox(height: 6),
-          const _DisabledNote('Настройки нельзя изменить во время подключения'),
+          const _DisabledNote('Настройки Xray нельзя изменить во время подключения'),
         ],
 
         const SizedBox(height: 20),
@@ -491,6 +584,125 @@ class _LinkRow extends StatelessWidget {
           await launchUrl(uri, mode: LaunchMode.externalApplication);
         }
       },
+    );
+  }
+}
+
+String _dnsLabel(AppSettings settings) {
+  if (settings.dnsPreset == 'custom') {
+    return settings.customDnsAddress;
+  }
+  return DnsServerConfig.presets.firstWhere(
+    (p) => p['value'] == settings.dnsPreset,
+    orElse: () => {'label': settings.dnsPreset},
+  )['label'] ?? settings.dnsPreset;
+}
+
+class _DnsSettingsScreen extends ConsumerStatefulWidget {
+  const _DnsSettingsScreen();
+
+  @override
+  ConsumerState<_DnsSettingsScreen> createState() => _DnsSettingsScreenState();
+}
+
+class _DnsSettingsScreenState extends ConsumerState<_DnsSettingsScreen> {
+  late String _selectedPreset;
+  late DnsType _customType;
+  late TextEditingController _customCtrl;
+
+  @override
+  void initState() {
+    super.initState();
+    final s = ref.read(settingsProvider).maybeWhen(data: (d) => d, orElse: () => null) ?? const AppSettings();
+    _selectedPreset = s.dnsPreset;
+    _customType = s.customDnsType == 'doh' ? DnsType.doh : s.customDnsType == 'dot' ? DnsType.dot : DnsType.udp;
+    _customCtrl = TextEditingController(text: s.customDnsAddress);
+  }
+
+  @override
+  void dispose() {
+    _customCtrl.dispose();
+    super.dispose();
+  }
+
+  void _save() {
+    final s = ref.read(settingsProvider).maybeWhen(data: (d) => d, orElse: () => null);
+    if (s != null) {
+      ref.read(settingsProvider.notifier).save(s.copyWith(
+        dnsPreset: _selectedPreset,
+        customDnsAddress: _customCtrl.text.trim().isEmpty ? '1.1.1.1' : _customCtrl.text.trim(),
+        customDnsType: _customType.name,
+      ));
+    }
+    Navigator.pop(context);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isCustom = _selectedPreset == 'custom';
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('DNS сервер'),
+        actions: [
+          TextButton(
+            onPressed: _save,
+            child: const Text('Сохранить', style: TextStyle(color: AppColors.primary)),
+          ),
+        ],
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text('Выберите DNS сервер:', style: TextStyle(color: AppColors.textSecondary, fontSize: 12)),
+          const SizedBox(height: 8),
+          ...DnsServerConfig.presets.map((p) {
+            final val = p['value'] as String;
+            final label = p['label'] as String;
+            return RadioListTile<String>(
+              title: Text(label, style: const TextStyle(fontSize: 14)),
+              value: val,
+              groupValue: _selectedPreset,
+              onChanged: (v) => setState(() => _selectedPreset = v!),
+            );
+          }),
+          if (isCustom) ...[
+            const SizedBox(height: 12),
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(color: AppColors.surfaceElevated, borderRadius: BorderRadius.circular(12)),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('Тип сервера:', style: TextStyle(color: AppColors.textSecondary, fontSize: 12)),
+                  const SizedBox(height: 4),
+                  DropdownButton<DnsType>(
+                    value: _customType,
+                    isExpanded: true,
+                    underline: const SizedBox(),
+                    items: DnsType.values.map((t) => DropdownMenuItem(
+                      value: t,
+                      child: Text(t == DnsType.udp ? 'UDP (порт 53)' : t == DnsType.doh ? 'DoH (HTTPS)' : 'DoT (TLS)',
+                          style: const TextStyle(color: AppColors.textPrimary)),
+                    )).toList(),
+                    onChanged: (v) => setState(() => _customType = v!),
+                  ),
+                  const SizedBox(height: 8),
+                  TextField(
+                    controller: _customCtrl,
+                    decoration: InputDecoration(
+                      hintText: _customType == DnsType.doh ? 'https://...' : 'IP-адрес',
+                      border: const OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
