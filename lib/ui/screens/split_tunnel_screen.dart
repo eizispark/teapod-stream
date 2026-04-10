@@ -145,36 +145,79 @@ class _AppListTile extends StatelessWidget {
         app.appName,
         style: TextStyle(
           color: app.isExcluded ? AppColors.textPrimary : AppColors.textSecondary,
-          fontWeight:
-              app.isExcluded ? FontWeight.w500 : FontWeight.normal,
+          fontWeight: app.isExcluded ? FontWeight.w500 : FontWeight.normal,
         ),
       ),
       subtitle: Text(
         app.packageName,
         style: const TextStyle(fontSize: 11, color: AppColors.textDisabled),
       ),
-      leading: Container(
-        width: 40,
-        height: 40,
-        decoration: BoxDecoration(
-          color: app.isExcluded
-              ? AppColors.error.withValues(alpha: 0.1)
-              : AppColors.surfaceHighlight,
-          borderRadius: BorderRadius.circular(10),
-        ),
-        child: Icon(
-          app.isExcluded
-              ? Icons.do_not_disturb_on_outlined
-              : Icons.apps_rounded,
-          color: app.isExcluded ? AppColors.error : AppColors.textDisabled,
-          size: 20,
-        ),
+      leading: Stack(
+        children: [
+          Container(
+            width: 40,
+            height: 40,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: app.iconImage != null
+                  ? Image(
+                      image: app.iconImage!,
+                      width: 40,
+                      height: 40,
+                      errorBuilder: (_, __, ___) => _FallbackIcon(isExcluded: app.isExcluded),
+                    )
+                  : _FallbackIcon(isExcluded: app.isExcluded),
+            ),
+          ),
+          if (app.isExcluded)
+            Positioned(
+              right: -4,
+              bottom: -4,
+              child: Container(
+                padding: const EdgeInsets.all(2),
+                decoration: BoxDecoration(
+                  color: AppColors.error,
+                  shape: BoxShape.circle,
+                  border: Border.all(color: AppColors.surface, width: 1.5),
+                ),
+                child: const Icon(
+                  Icons.block_rounded,
+                  size: 12,
+                  color: Colors.white,
+                ),
+              ),
+            ),
+        ],
       ),
       trailing: Switch(
         value: app.isExcluded,
         onChanged: (_) => onToggle(),
       ),
       onTap: onToggle,
+    );
+  }
+}
+
+class _FallbackIcon extends StatelessWidget {
+  final bool isExcluded;
+  const _FallbackIcon({required this.isExcluded});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: BoxDecoration(
+        color: isExcluded
+            ? AppColors.error.withValues(alpha: 0.1)
+            : AppColors.surfaceHighlight,
+      ),
+      child: Icon(
+        Icons.apps_rounded,
+        color: isExcluded ? AppColors.error : AppColors.textDisabled,
+        size: 20,
+      ),
     );
   }
 }

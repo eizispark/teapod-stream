@@ -16,7 +16,11 @@ class LogsScreen extends ConsumerStatefulWidget {
 class _LogsScreenState extends ConsumerState<LogsScreen> {
   final _scrollController = ScrollController();
   bool _autoScroll = true;
-  final Set<LogLevel> _selectedLevels = {...LogLevel.values};
+  final Set<LogLevel> _selectedLevels = {
+    LogLevel.error,
+    LogLevel.warning,
+    LogLevel.info,
+  };
 
   @override
   void dispose() {
@@ -88,8 +92,10 @@ class _LogsScreenState extends ConsumerState<LogsScreen> {
           ),
         ],
       ),
-      body: Column(
-        children: [
+      body: Container(
+        color: AppColors.surface,
+        child: Column(
+          children: [
           // Stats bar
           Container(
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -229,6 +235,7 @@ class _LogsScreenState extends ConsumerState<LogsScreen> {
                   ),
           ),
         ],
+        ),
       ),
       floatingActionButton: !_autoScroll
           ? FloatingActionButton.small(

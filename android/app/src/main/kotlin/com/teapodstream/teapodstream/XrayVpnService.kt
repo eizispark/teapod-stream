@@ -7,6 +7,10 @@ import android.app.PendingIntent
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
+import android.net.ConnectivityManager
+import android.net.Network
+import android.net.NetworkCapabilities
+import android.net.NetworkRequest
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -78,6 +82,7 @@ class XrayVpnService : VpnService() {
     private var tun2socksPid: Long = -1L
     private var statsThread: Thread? = null
     private var isRunning = false
+    private var networkCallback: ConnectivityManager.NetworkCallback? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_DISCONNECT) {
@@ -198,6 +203,7 @@ class XrayVpnService : VpnService() {
             log("info", "tun2socks started (pid=$tun2socksPid)")
 
             startStatsMonitoring()
+            registerNetworkCallback()
             VpnEventStreamHandler.sendStateEvent("connected")
             log("info", "VPN connected successfully")
         } catch (e: Exception) {
@@ -220,6 +226,7 @@ class XrayVpnService : VpnService() {
 
     private fun stopVpn() {
         isRunning = false
+        unregisterNetworkCallback()
         statsThread?.interrupt()
         if (tun2socksPid > 0) {
             nativeKillProcess(tun2socksPid)
@@ -276,6 +283,56 @@ class XrayVpnService : VpnService() {
                 } catch (_: InterruptedException) { break } catch (_: Exception) {}
             }
         }.also { it.isDaemon = true; it.start() }
+    }
+
+    private fun registerNetworkCallback() {
+        try {
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            networkCallback = object : ConnectivityManager.NetworkCallback() {
+                override fun onAvailable(network: Network) {
+                    log("info", "Network available, updating underlying networks")
+                    updateUnderlyingNetworks(cm)
+                }
+
+                override fun onLost(network: Network) {
+                    log("info", "Network lost, updating underlying networks")
+                    updateUnderlyingNetworks(cm)
+                }
+
+                override fun onCapabilitiesChanged(network: Network, networkCapabilities: NetworkCapabilities) {
+                    // Network type changed, update
+                    updateUnderlyingNetworks(cm)
+                }
+            }
+            val request = NetworkRequest.Builder()
+                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                .build()
+            cm.registerNetworkCallback(request, networkCallback!!)
+        } catch (e: Exception) {
+            log("warning", "Failed to register network callback: ${e.message}")
+        }
+    }
+
+    private fun updateUnderlyingNetworks(cm: ConnectivityManager) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val activeNetwork = cm.activeNetwork
+            if (activeNetwork != null) {
+                setUnderlyingNetworks(arrayOf(activeNetwork))
+                log("info", "Updated underlying network")
+            }
+        }
+    }
+
+    private fun unregisterNetworkCallback() {
+        try {
+            val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+            networkCallback?.let {
+                cm.unregisterNetworkCallback(it)
+                networkCallback = null
+            }
+        } catch (e: Exception) {
+            // Ignore
+        }
     }
 
     private fun startForegroundNotification() {

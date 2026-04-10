@@ -2,12 +2,17 @@ package com.teapodstream.teapodstream
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
+import android.graphics.drawable.Drawable
 import android.net.VpnService
 import android.os.Build
+import android.util.Base64
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodChannel
+import java.io.ByteArrayOutputStream
+import java.net.InetSocketAddress
 
 class MainActivity : FlutterActivity() {
 
@@ -107,6 +112,13 @@ class MainActivity : FlutterActivity() {
                         }.start()
                     }
 
+                    "getBinaryVersions" -> {
+                        Thread {
+                            val versions = getBinaryVersions()
+                            runOnUiThread { result.success(versions) }
+                        }.start()
+                    }
+
                     else -> result.notImplemented()
                 }
             }
@@ -195,23 +207,68 @@ class MainActivity : FlutterActivity() {
         }
     }
 
-    private fun getInstalledApps(): List<Map<String, String>> {
+    private fun getInstalledApps(): List<Map<String, String?>> {
         val pm = packageManager
         val packages = pm.getInstalledPackages(0)
         return packages
-            .filter { it.packageName != packageName } // exclude self
+            .filter { it.packageName != packageName }
             .mapNotNull { pkg ->
                 try {
                     val appInfo = pkg.applicationInfo ?: return@mapNotNull null
                     val appName = pm.getApplicationLabel(appInfo).toString()
+                    val iconBase64 = drawableToBase64(appInfo.loadIcon(pm))
                     mapOf(
                         "packageName" to pkg.packageName,
                         "appName" to appName,
+                        "icon" to iconBase64,
                     )
                 } catch (e: Exception) {
                     null
                 }
             }
             .sortedBy { it["appName"] }
+    }
+
+    private fun drawableToBase64(drawable: Drawable): String {
+        val size = (48 * resources.displayMetrics.density).toInt().coerceAtLeast(72)
+        val bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = android.graphics.Canvas(bitmap)
+        drawable.setBounds(0, 0, size, size)
+        drawable.draw(canvas)
+
+        val stream = ByteArrayOutputStream()
+        bitmap.compress(Bitmap.CompressFormat.PNG, 80, stream)
+        bitmap.recycle()
+        return Base64.encodeToString(stream.toByteArray(), Base64.NO_WRAP)
+    }
+
+    private fun getBinaryVersions(): Map<String, String> {
+        val versions = mutableMapOf<String, String>()
+        try {
+            val libDir = applicationInfo.nativeLibraryDir
+
+            // Xray version
+            val xrayBin = "$libDir/libxray.so"
+            val xrayProc = ProcessBuilder(xrayBin, "-version").start()
+            val xrayOut = xrayProc.inputStream.bufferedReader().readText().trim()
+            versions["xray"] = xrayOut.lines().firstOrNull()?.split(" ")?.getOrNull(1) ?: "Unknown"
+            xrayProc.waitFor()
+
+            // Tun2socks version
+            val tun2socksBin = "$libDir/libtun2socks.so"
+            val tun2socksProc = ProcessBuilder(tun2socksBin, "--version").start()
+            val tun2socksOut = tun2socksProc.inputStream.bufferedReader().readText().trim()
+            // Strip "tun2socks " prefix if present (e.g. "tun2socks 2.6.0" -> "2.6.0")
+            var tun2socksVersion = tun2socksOut.lines().firstOrNull()?.replaceFirst(Regex("^tun2socks\\s*"), "") ?: "Unknown"
+            // Keep only the version part (digits and dots), strip OS/arch suffix
+            val verMatch = Regex("(\\d+\\.\\d+\\.\\d+)").find(tun2socksVersion)
+            tun2socksVersion = verMatch?.value ?: tun2socksVersion
+            versions["tun2socks"] = tun2socksVersion
+            tun2socksProc.waitFor()
+        } catch (e: Exception) {
+            versions["xray"] = "Error"
+            versions["tun2socks"] = "Error"
+        }
+        return versions
     }
 }

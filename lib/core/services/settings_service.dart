@@ -8,6 +8,7 @@ class AppSettings {
   final Set<String> excludedPackages;
   final bool splitTunnelingEnabled;
   final bool randomPort;
+  final bool autoConnect;
 
   const AppSettings({
     this.socksPort = AppConstants.defaultSocksPort,
@@ -15,6 +16,7 @@ class AppSettings {
     this.excludedPackages = const {},
     this.splitTunnelingEnabled = false,
     this.randomPort = true,
+    this.autoConnect = false,
   });
 
   AppSettings copyWith({
@@ -23,6 +25,7 @@ class AppSettings {
     Set<String>? excludedPackages,
     bool? splitTunnelingEnabled,
     bool? randomPort,
+    bool? autoConnect,
   }) {
     return AppSettings(
       socksPort: socksPort ?? this.socksPort,
@@ -31,6 +34,7 @@ class AppSettings {
       splitTunnelingEnabled:
           splitTunnelingEnabled ?? this.splitTunnelingEnabled,
       randomPort: randomPort ?? this.randomPort,
+      autoConnect: autoConnect ?? this.autoConnect,
     );
   }
 }
@@ -41,6 +45,7 @@ class SettingsService {
   static const _excludedPackagesKey = 'excluded_packages';
   static const _splitTunnelingKey = 'split_tunneling_enabled';
   static const _randomPortKey = 'random_port';
+  static const _autoConnectKey = 'auto_connect';
 
   Future<AppSettings> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -54,6 +59,7 @@ class SettingsService {
       excludedPackages: excluded,
       splitTunnelingEnabled: prefs.getBool(_splitTunnelingKey) ?? false,
       randomPort: prefs.getBool(_randomPortKey) ?? true,
+      autoConnect: prefs.getBool(_autoConnectKey) ?? false,
     );
   }
 
@@ -65,5 +71,6 @@ class SettingsService {
         _excludedPackagesKey, settings.excludedPackages.toList());
     await prefs.setBool(_splitTunnelingKey, settings.splitTunnelingEnabled);
     await prefs.setBool(_randomPortKey, settings.randomPort);
+    await prefs.setBool(_autoConnectKey, settings.autoConnect);
   }
 }

@@ -229,6 +229,16 @@ class XrayEngine implements VpnEngine {
     return true; // xray supports all common protocols
   }
 
+  Future<Map<String, String>> getBinaryVersions() async {
+    try {
+      final result = await _channel.invokeMethod<Map>('getBinaryVersions');
+      if (result != null) {
+        return Map<String, String>.from(result);
+      }
+    } catch (_) {}
+    return {'xray': '—', 'tun2socks': '—'};
+  }
+
   /// Generate cryptographically random SOCKS credentials
   static ({String user, String password}) generateSocksCredentials() {
     const chars =

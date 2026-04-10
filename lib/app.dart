@@ -1,10 +1,14 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'ui/theme/app_theme.dart';
 import 'ui/screens/home_screen.dart';
 import 'ui/screens/configs_screen.dart';
 import 'ui/screens/logs_screen.dart';
 import 'ui/screens/settings_screen.dart';
+import 'providers/config_provider.dart';
+import 'providers/vpn_provider.dart';
+import 'providers/settings_provider.dart';
 
 class TeapodApp extends StatelessWidget {
   const TeapodApp({super.key});
@@ -40,12 +44,34 @@ class _AppShellState extends ConsumerState<_AppShell> {
   ];
 
   @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _tryAutoConnect());
+  }
+
+  Future<void> _tryAutoConnect() async {
+    final settings = ref.read(settingsProvider).maybeWhen(
+      data: (d) => d,
+      orElse: () => null,
+    );
+    if (settings == null || !settings.autoConnect) return;
+
+    final configState = ref.read(configProvider).maybeWhen(
+      data: (d) => d,
+      orElse: () => null,
+    );
+    if (configState?.activeConfig == null) return;
+
+    final vpnState = ref.read(vpnProvider);
+    if (!vpnState.isConnected && !vpnState.isConnecting) {
+      await ref.read(vpnProvider.notifier).connect();
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: IndexedStack(
-        index: _currentIndex,
-        children: _pages,
-      ),
+      body: IndexedStack(index: _currentIndex, children: _pages),
       bottomNavigationBar: NavigationBar(
         selectedIndex: _currentIndex,
         onDestinationSelected: (i) => setState(() => _currentIndex = i),

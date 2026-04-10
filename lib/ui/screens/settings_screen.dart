@@ -1,18 +1,66 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../core/models/vpn_log_entry.dart';
+import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../core/services/settings_service.dart';
 import '../../providers/settings_provider.dart';
 import '../../providers/vpn_provider.dart';
 import '../theme/app_colors.dart';
 import 'split_tunnel_screen.dart';
 
-class SettingsScreen extends ConsumerWidget {
+class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+  String _version = '';
+  String _xrayVersion = '';
+  String _tun2socksVersion = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _loadVersion();
+    _loadBinaryVersions();
+  }
+
+  Future<void> _loadVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (mounted) {
+        setState(() => _version = 'v${info.version}');
+      }
+    } catch (_) {
+      if (mounted) setState(() => _version = 'v1.0.0');
+    }
+  }
+
+  Future<void> _loadBinaryVersions() async {
+    try {
+      const channel = MethodChannel('com.teapodstream/vpn');
+      final result = await channel.invokeMethod<Map>('getBinaryVersions');
+      if (result != null && mounted) {
+        setState(() {
+          _xrayVersion = result['xray'] ?? '—';
+          _tun2socksVersion = result['tun2socks'] ?? '—';
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() {
+          _xrayVersion = '—';
+          _tun2socksVersion = '—';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final settingsAsync = ref.watch(settingsProvider);
     final vpnState = ref.watch(vpnProvider);
 
@@ -24,6 +72,9 @@ class SettingsScreen extends ConsumerWidget {
         data: (settings) => _SettingsBody(
           settings: settings,
           isConnected: vpnState.isConnected,
+          version: _version,
+          xrayVersion: _xrayVersion,
+          tun2socksVersion: _tun2socksVersion,
           onUpdate: (s) => ref.read(settingsProvider.notifier).save(s),
         ),
       ),
@@ -34,11 +85,17 @@ class SettingsScreen extends ConsumerWidget {
 class _SettingsBody extends StatefulWidget {
   final AppSettings settings;
   final bool isConnected;
+  final String version;
+  final String xrayVersion;
+  final String tun2socksVersion;
   final void Function(AppSettings) onUpdate;
 
   const _SettingsBody({
     required this.settings,
     required this.isConnected,
+    required this.version,
+    required this.xrayVersion,
+    required this.tun2socksVersion,
     required this.onUpdate,
   });
 
@@ -83,6 +140,22 @@ class _SettingsBodyState extends State<_SettingsBody> {
           children: [
             SwitchListTile(
               title: const Text(
+                'Автоподключение',
+                style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
+              ),
+              subtitle: const Text(
+                'Подключаться при запуске приложения',
+                style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+              ),
+              value: widget.settings.autoConnect,
+              onChanged: widget.isConnected
+                  ? null
+                  : (v) => widget.onUpdate(
+                      widget.settings.copyWith(autoConnect: v)),
+            ),
+            const _Divider(),
+            SwitchListTile(
+              title: const Text(
                 'Случайный порт',
                 style: TextStyle(color: AppColors.textPrimary, fontSize: 15),
               ),
@@ -112,64 +185,6 @@ class _SettingsBodyState extends State<_SettingsBody> {
           const SizedBox(height: 6),
           const _DisabledNote('Настройки нельзя изменить во время подключения'),
         ],
-
-        const SizedBox(height: 20),
-
-        // Logging section
-        _SectionHeader('Логирование'),
-        const SizedBox(height: 8),
-        _SettingsCard(
-          children: [
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-              child: Row(
-                children: [
-                  const Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'Уровень логов',
-                          style: TextStyle(color: AppColors.textPrimary),
-                        ),
-                        Text(
-                          'Verbose логи могут снизить производительность',
-                          style: TextStyle(
-                            color: AppColors.textSecondary,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  DropdownButton<LogLevel>(
-                    value: widget.settings.logLevel,
-                    dropdownColor: AppColors.surfaceElevated,
-                    style: const TextStyle(color: AppColors.textPrimary),
-                    underline: const SizedBox(),
-                    items: LogLevel.values
-                        .map(
-                          (l) => DropdownMenuItem(
-                            value: l,
-                            child: Text(
-                              l.name[0].toUpperCase() + l.name.substring(1),
-                            ),
-                          ),
-                        )
-                        .toList(),
-                    onChanged: (l) {
-                      if (l != null) {
-                        widget.onUpdate(
-                            widget.settings.copyWith(logLevel: l));
-                      }
-                    },
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
 
         const SizedBox(height: 20),
 
@@ -236,42 +251,36 @@ class _SettingsBodyState extends State<_SettingsBody> {
         const SizedBox(height: 8),
         _SettingsCard(
           children: [
-            const ListTile(
-              title: Text(
+            ListTile(
+              title: const Text(
                 'TeapodStream',
                 style: TextStyle(color: AppColors.textPrimary),
               ),
               subtitle: Text(
                 'VPN клиент с поддержкой xray',
-                style: TextStyle(color: AppColors.textSecondary, fontSize: 12),
+                style: const TextStyle(color: AppColors.textSecondary, fontSize: 12),
               ),
               trailing: Text(
-                'v1.0.0',
-                style: TextStyle(color: AppColors.textDisabled),
+                widget.version.isEmpty ? '...' : widget.version,
+                style: const TextStyle(color: AppColors.textDisabled),
               ),
             ),
             const _Divider(),
-            ListTile(
-              title: const Text(
-                'Конфиденциальность SOCKS',
-                style: TextStyle(color: AppColors.textPrimary),
-              ),
-              subtitle: const Text(
-                'Прокси защищён случайными учётными данными. '
-                'Только tun2socks имеет доступ к SOCKS прокси.',
-                style:
-                    TextStyle(color: AppColors.textSecondary, fontSize: 12),
-              ),
-              leading: Container(
-                width: 36,
-                height: 36,
-                decoration: BoxDecoration(
-                  color: AppColors.connected.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: const Icon(Icons.lock_outline,
-                    color: AppColors.connected, size: 18),
-              ),
+            _LinkRow(icon: Icons.code_rounded, label: 'Исходный код', url: 'https://github.com/Wendor/teapod-stream'),
+            const _Divider(),
+            _ComponentRow(
+              icon: Icons.shield_rounded,
+              label: 'Xray Core',
+              version: widget.xrayVersion.isEmpty ? '...' : widget.xrayVersion,
+              license: 'MIT License',
+              url: 'https://github.com/XTLS/Xray-core',
+            ),
+            _ComponentRow(
+              icon: Icons.shuffle_rounded,
+              label: 'tun2socks',
+              version: widget.tun2socksVersion.isEmpty ? '...' : widget.tun2socksVersion,
+              license: 'Apache 2.0',
+              url: 'https://github.com/xjasonlyu/tun2socks',
             ),
           ],
         ),
@@ -408,6 +417,80 @@ class _DisabledNote extends StatelessWidget {
           ),
         ],
       ),
+    );
+  }
+}
+
+class _ComponentRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String version;
+  final String license;
+  final String url;
+  const _ComponentRow({
+    required this.icon,
+    required this.label,
+    required this.version,
+    required this.license,
+    required this.url,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: InkWell(
+        onTap: () async {
+          final uri = Uri.parse(url);
+          if (await canLaunchUrl(uri)) {
+            await launchUrl(uri, mode: LaunchMode.externalApplication);
+          }
+        },
+        borderRadius: BorderRadius.circular(10),
+        child: Container(
+          width: 36,
+          height: 36,
+          decoration: BoxDecoration(
+            color: AppColors.primaryDim.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(10),
+          ),
+          child: Icon(icon, color: AppColors.primary, size: 18),
+        ),
+      ),
+      title: Text(label, style: const TextStyle(color: AppColors.textPrimary)),
+      subtitle: Text(
+        license,
+        style: const TextStyle(color: AppColors.textSecondary, fontSize: 11),
+      ),
+      trailing: Text(
+        version,
+        style: const TextStyle(
+          color: AppColors.textDisabled,
+          fontFamily: 'monospace',
+          fontSize: 13,
+        ),
+      ),
+    );
+  }
+}
+
+class _LinkRow extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final String url;
+  const _LinkRow({required this.icon, required this.label, required this.url});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      leading: Icon(icon, color: AppColors.primary, size: 20),
+      title: Text(label, style: const TextStyle(color: AppColors.textPrimary)),
+      trailing: const Icon(Icons.open_in_new_rounded, color: AppColors.textDisabled, size: 18),
+      onTap: () async {
+        final uri = Uri.parse(url);
+        if (await canLaunchUrl(uri)) {
+          await launchUrl(uri, mode: LaunchMode.externalApplication);
+        }
+      },
     );
   }
 }
