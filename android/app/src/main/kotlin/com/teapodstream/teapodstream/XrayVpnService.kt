@@ -175,20 +175,24 @@ class XrayVpnService : VpnService() {
                             log("warning", "Failed to allow $pkg: ${e.message}")
                         }
                     }
+                    // NOTE: When using addAllowedApplication, all other apps
+                    // (including our own) are automatically excluded.
+                    // We CANNOT call addDisallowedApplication after addAllowedApplication.
                 } else {
                     log("warning", "onlySelected mode requires Android 10+, falling back to allExcept")
                     for (pkg in excludedPackages) {
                         try { builder.addDisallowedApplication(pkg) } catch (_: Exception) {}
                     }
+                    try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
                 }
             } else {
                 // All apps go through VPN, except excluded (default behavior)
                 for (pkg in excludedPackages) {
                     try { builder.addDisallowedApplication(pkg) } catch (_: Exception) {}
                 }
+                // Always exclude own app to prevent routing loops
+                try { builder.addDisallowedApplication(packageName) } catch (_: Exception) {}
             }
-            // Always exclude own app to prevent routing loops
-            builder.addDisallowedApplication(packageName)
 
             // Raise fd limit - done in child process via native code
             val fdResult = nativeSetMaxFds(65536)
