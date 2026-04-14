@@ -46,8 +46,8 @@ class MainActivity : FlutterActivity() {
                         val excludedPackages = call.argument<List<String>>("excludedPackages") ?: emptyList()
                         val includedPackages = call.argument<List<String>>("includedPackages") ?: emptyList()
                         val vpnMode = call.argument<String>("vpnMode") ?: "allExcept"
-                        val tunAddress = call.argument<String>("tunAddress") ?: "198.18.0.1"
-                        val tunNetmask = call.argument<String>("tunNetmask") ?: "255.255.0.0"
+                        val tunAddress = call.argument<String>("tunAddress") ?: "10.0.0.1"
+                        val tunNetmask = call.argument<String>("tunNetmask") ?: "255.255.255.0"
                         val tunMtu = call.argument<Int>("tunMtu") ?: 1500
                         val tunDns = call.argument<String>("tunDns") ?: "1.1.1.1"
                         val enableUdp = call.argument<Boolean>("enableUdp") ?: true
@@ -78,7 +78,6 @@ class MainActivity : FlutterActivity() {
 
                     "isBinaryReady" -> {
                         val xray = java.io.File(applicationInfo.nativeLibraryDir, "libxray.so")
-                        val tun2socks = java.io.File(applicationInfo.nativeLibraryDir, "libtun2socks.so")
                         val geoip = java.io.File(filesDir, "geoip.dat")
                         val geosite = java.io.File(filesDir, "geosite.dat")
                         
@@ -87,7 +86,7 @@ class MainActivity : FlutterActivity() {
                             XrayVpnService.prepareBinaries(this)
                         }
                         
-                        result.success(xray.exists() && tun2socks.exists() && geoip.exists() && geosite.exists())
+                        result.success(xray.exists() && geoip.exists() && geosite.exists())
                     }
 
                     "prepareBinaries" -> {
@@ -264,17 +263,9 @@ class MainActivity : FlutterActivity() {
             versions["xray"] = xrayOut.lines().firstOrNull()?.split(" ")?.getOrNull(1) ?: "Unknown"
             xrayProc.waitFor()
 
-            // Tun2socks version
-            val tun2socksBin = "$libDir/libtun2socks.so"
-            val tun2socksProc = ProcessBuilder(tun2socksBin, "--version").start()
-            val tun2socksOut = tun2socksProc.inputStream.bufferedReader().readText().trim()
-            // Strip "tun2socks " prefix if present (e.g. "tun2socks 2.6.0" -> "2.6.0")
-            var tun2socksVersion = tun2socksOut.lines().firstOrNull()?.replaceFirst(Regex("^tun2socks\\s*"), "") ?: "Unknown"
-            // Keep only the version part (digits and dots), strip OS/arch suffix
-            val verMatch = Regex("(\\d+\\.\\d+\\.\\d+)").find(tun2socksVersion)
-            tun2socksVersion = verMatch?.value ?: tun2socksVersion
-            versions["tun2socks"] = tun2socksVersion
-            tun2socksProc.waitFor()
+            // Teapod-tun2socks version (from AAR package)
+            // Version is embedded in the AAR, we can get it from the package
+            versions["tun2socks"] = "teapod-tun2socks (AAR)"
         } catch (e: Exception) {
             versions["xray"] = "Error"
             versions["tun2socks"] = "Error"

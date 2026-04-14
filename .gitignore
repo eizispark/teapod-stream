@@ -34,6 +34,7 @@ android/captures/
 #  Native binaries (downloaded via ./build.sh binaries)
 # ─────────────────────────────────────────
 android/app/src/main/jniLibs/
+android/app/libs/*.aar
 assets/binaries/
 
 # ─────────────────────────────────────────
@@ -44,6 +45,7 @@ assets/binaries/
 *.swp
 *.swo
 *~
+.vscode/
 
 # ─────────────────────────────────────────
 #  OS

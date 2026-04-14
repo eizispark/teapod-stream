@@ -12,7 +12,8 @@ import 'xray_config_builder.dart';
 /// The native side:
 ///   1. Creates a TUN interface via VpnService API
 ///   2. Starts xray with the provided JSON config (SOCKS inbound with auth)
-///   3. Starts tun2socks to bridge TUN → xray SOCKS (using the generated auth)
+///   3. Starts teapod-tun2socks (AAR) to bridge TUN → xray SOCKS
+///      with strict split-tunneling UID validation
 ///   4. Handles split tunneling via VpnService app allow/deny lists
 class XrayEngine implements VpnEngine {
   static const _channel =

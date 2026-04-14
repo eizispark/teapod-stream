@@ -370,10 +370,10 @@ class _SettingsBodyState extends State<_SettingsBody> {
             ),
             _ComponentRow(
               icon: Icons.shuffle_rounded,
-              label: 'tun2socks',
+              label: 'teapod-tun2socks',
               version: widget.tun2socksVersion.isEmpty ? '...' : widget.tun2socksVersion,
-              license: 'Apache 2.0',
-              url: 'https://github.com/xjasonlyu/tun2socks',
+              license: 'MIT License',
+              url: 'https://github.com/Wendor/teapod-tun2socks',
             ),
           ],
         ),

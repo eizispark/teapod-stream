@@ -18,6 +18,8 @@ import android.system.OsConstants
 import android.net.TrafficStats
 import androidx.core.app.NotificationCompat
 import java.io.File
+import com.teapodstream.tun2socks.TeapodVpnManager
+import com.teapodstream.tun2socks.WhitelistMode
 
 class XrayVpnService : VpnService() {
 
@@ -26,7 +28,6 @@ class XrayVpnService : VpnService() {
             System.loadLibrary("vpnhelper")
         }
 
-        @JvmStatic external fun nativeStartProcessWithFd(cmd: String, args: Array<String>, envKeys: Array<String>, envVals: Array<String>, keepFd: Int, maxFds: Int): Long
         @JvmStatic external fun nativeKillProcess(pid: Long): Int
         @JvmStatic external fun nativeSetMaxFds(maxFds: Int): Int
         const val ACTION_CONNECT = "com.teapodstream.CONNECT"
@@ -85,7 +86,7 @@ class XrayVpnService : VpnService() {
     private var tunInterface: ParcelFileDescriptor? = null
     private var xrayProcess: Process? = null
     private var xrayPid: Long = -1L
-    private var tun2socksPid: Long = -1L
+    private var teapodVpnManager: TeapodVpnManager? = null
     private var statsThread: Thread? = null
     private var isRunning = false
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -150,7 +151,7 @@ class XrayVpnService : VpnService() {
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer(tunDns)
                 .allowFamily(OsConstants.AF_INET)
-                .setBlocking(false)
+                .setBlocking(true)
 
             // On Android 8+, set underlying networks for better routing
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -200,11 +201,7 @@ class XrayVpnService : VpnService() {
 
             tunInterface = builder.establish() ?: throw IllegalStateException("Failed to establish TUN")
 
-            // dup() creates a new fd WITHOUT FD_CLOEXEC (standard POSIX dup() behavior).
-            // This lets tun2socks inherit the fd across fork+exec and use it bidirectionally.
-            val tunDupPfd = ParcelFileDescriptor.dup(tunInterface!!.fileDescriptor)
-            val tunFd = tunDupPfd.fd
-            log("info", "TUN established, dup fd=$tunFd")
+            log("info", "TUN established")
 
             // 1. Start Xray directly (FD limit set by parent process)
             val xrayBin = File(applicationInfo.nativeLibraryDir, "libxray.so")
@@ -228,35 +225,63 @@ class XrayVpnService : VpnService() {
             }
             log("info", "xray started")
 
-            // 2. Start tun2socks using native fork+exec so the TUN fd is properly inherited.
-            // Java's ProcessBuilder closes all non-stdio fds in the child; native fork bypasses that.
-            val tun2socksBin = File(applicationInfo.nativeLibraryDir, "libtun2socks.so")
-            val proxyUrl = if (socksUser.isNotEmpty()) {
-                "socks5://$socksUser:$socksPassword@127.0.0.1:$socksPort"
-            } else {
-                "socks5://127.0.0.1:$socksPort"
+            // 2. Start teapod-tun2socks (with strict split-tunneling UID validation)
+            teapodVpnManager = TeapodVpnManager(this)
+
+            // Convert package names to UIDs for split tunneling
+            val allowedUids = mutableSetOf<Int>()
+            val whitelistMode = when (vpnMode) {
+                "onlySelected" -> {
+                    // Only selected apps go through VPN
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                        for (pkg in includedPackages) {
+                            try {
+                                val uid = packageManager.getPackageUid(pkg, PackageManager.GET_META_DATA)
+                                allowedUids.add(uid)
+                                log("info", "Allowed UID for $pkg: $uid")
+                            } catch (e: Exception) {
+                                log("warning", "Failed to get UID for $pkg: ${e.message}")
+                            }
+                        }
+                    }
+                    WhitelistMode.ALLOW_ONLY
+                }
+                else -> {
+                    // All apps go through VPN, except excluded
+                    for (pkg in excludedPackages) {
+                        try {
+                            val uid = packageManager.getPackageUid(pkg, PackageManager.GET_META_DATA)
+                            allowedUids.add(uid)
+                            log("info", "Excluded UID for $pkg: $uid")
+                        } catch (e: Exception) {
+                            log("warning", "Failed to get UID for $pkg: ${e.message}")
+                        }
+                    }
+                    // Always exclude own app to prevent routing loops
+                    try {
+                        val uid = packageManager.getPackageUid(packageName, PackageManager.GET_META_DATA)
+                        allowedUids.add(uid)
+                        log("info", "Excluded own UID ($packageName): $uid")
+                    } catch (e: Exception) {
+                        log("warning", "Failed to get own UID: ${e.message}")
+                    }
+                    WhitelistMode.DENY_ONLY
+                }
             }
-            val t2sArgs = arrayOf(
-                tun2socksBin.absolutePath,
-                "-device", "fd://$tunFd",
-                "-proxy", proxyUrl,
-                "-mtu", tunMtu.toString(),
-                "-loglevel", "error",
-                "-tcp-sndbuf", "524288",
-                "-tcp-rcvbuf", "524288",
-                "-tcp-auto-tuning",
+
+            log("info", "Starting teapod-tun2socks: mode=$whitelistMode uids=${allowedUids.size}")
+
+            teapodVpnManager!!.start(
+                tunFd = tunInterface!!,
+                socksHost = "127.0.0.1",
+                socksPort = socksPort,
+                socksUsername = socksUser,
+                socksPassword = socksPassword,
+                allowedUids = allowedUids,
+                whitelistMode = whitelistMode
             )
-            log("info", "Starting tun2socks (native): ${t2sArgs.joinToString(" ")}")
-            tun2socksPid = nativeStartProcessWithFd(tun2socksBin.absolutePath, t2sArgs, emptyArray(), emptyArray(), tunFd, 65536)
-            if (tun2socksPid < 0) {
-                throw IllegalStateException("nativeStartProcessWithFd failed: errno=${-tun2socksPid}")
-            }
 
-            // Close our copy of the dup'd fd - tun2socks child has its own copy now
-            tunDupPfd.close()
-
-            Thread.sleep(300)
-            log("info", "tun2socks started (pid=$tun2socksPid)")
+            log("info", "teapod-tun2socks started successfully")
 
             startStatsMonitoring()
             registerNetworkCallback()
@@ -286,10 +311,15 @@ class XrayVpnService : VpnService() {
         isRunning = false
         unregisterNetworkCallback()
         statsThread?.interrupt()
-        if (tun2socksPid > 0) {
-            nativeKillProcess(tun2socksPid)
-            tun2socksPid = -1L
+        
+        // Stop teapod-tun2socks
+        try {
+            teapodVpnManager?.stop()
+        } catch (e: Exception) {
+            log("warning", "Error stopping teapod-tun2socks: ${e.message}")
         }
+        teapodVpnManager = null
+        
         if (xrayPid > 0) {
             nativeKillProcess(xrayPid)
             xrayPid = -1L

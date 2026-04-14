@@ -8,7 +8,7 @@ set -euo pipefail
 #    ./build.sh release      — release APK (split per ABI)
 #    ./build.sh aab          — release AAB (Google Play)
 #    ./build.sh run          — запуск на подключённом устройстве
-#    ./build.sh binaries     — скачать xray + tun2socks + geodata
+#    ./build.sh binaries     — скачать xray + geodata
 #    ./build.sh clean        — очистить build артефакты
 # ─────────────────────────────────────────
 
@@ -16,8 +16,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 JNILIBS_DIR="android/app/src/main/jniLibs"
+LIBS_DIR="android/app/libs"
 ALL_ABIS=("arm64-v8a" "x86_64")
 DEFAULT_ABI="arm64-v8a"
+TUN2SOCKS_REPO="Wendor/teapod-tun2socks"
+LOCAL_TUN2SOCKS_DIR="../teapod-tun2socks/output"
+NDK_VERSION="28.2.13676358"
 
 # ─── Version from pubspec.yaml (format: "1.0.0+5002") ───
 VERSION=$(grep "^version:" pubspec.yaml | head -1 | cut -d' ' -f2 | cut -d'+' -f1)
@@ -56,14 +60,16 @@ check_binaries() {
   fi
 
   for abi in "${abis_to_check[@]}"; do
-    for f in "libxray.so" "libtun2socks.so"; do
-      if [[ ! -f "$JNILIBS_DIR/$abi/$f" ]]; then
-        if [[ "$abi" == "$DEFAULT_ABI" ]]; then
-          warn "Отсутствует критический файл: $JNILIBS_DIR/$abi/$f"
-          missing=1
-        fi
+    if [[ ! -f "$JNILIBS_DIR/$abi/libxray.so" ]]; then
+      if [[ "$abi" == "$DEFAULT_ABI" ]]; then
+        warn "Отсутствует критический файл: $JNILIBS_DIR/$abi/libxray.so"
+        missing=1
       fi
-    done
+    fi
+    if [[ ! -f "$LIBS_DIR/teapod-tun2socks-$abi.aar" ]]; then
+      warn "Отсутствует: $LIBS_DIR/teapod-tun2socks-$abi.aar"
+      missing=1
+    fi
   done
 
   local ASSETS_BIN="assets/binaries"
@@ -79,6 +85,26 @@ check_binaries() {
     return 1
   fi
   return 0
+}
+
+find_strip_tool() {
+  local ndk_path="/opt/homebrew/share/android-commandlinetools/ndk/$NDK_VERSION"
+  local tool="$ndk_path/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-strip"
+  if [[ -x "$tool" ]]; then
+    echo "$tool"
+  else
+    find "$ANDROID_HOME/ndk" -name "llvm-strip" -type f | head -1
+  fi
+}
+
+strip_binary() {
+  local target=$1
+  if [[ ! -f "$target" ]]; then return; fi
+  
+  local strip_tool=$(find_strip_tool)
+  if [[ -n "$strip_tool" ]]; then
+    "$strip_tool" --strip-unneeded "$target"
+  fi
 }
 
 download_abi_binaries() {
@@ -97,42 +123,82 @@ download_abi_binaries() {
     if [[ -n "$found" ]]; then
       cp "$found" "$JNILIBS_DIR/$abi/libxray.so"
       chmod +x "$JNILIBS_DIR/$abi/libxray.so"
+      strip_binary "$JNILIBS_DIR/$abi/libxray.so"
       ok "xray → $JNILIBS_DIR/$abi/libxray.so"
     fi
   else
     warn "Пропуск xray для $abi"
   fi
-  rm -rf "$TMP_XRAY"
-
-  log "Скачиваем tun2socks ($abi)..."
-  local tun_file="tun2socks-linux-arm64"
-  [[ "$abi" == "x86_64" ]] && tun_file="tun2socks-linux-amd64"
-
-  local TMP_TUN=$(mktemp -d)
-  if curl -L --progress-bar "https://github.com/xjasonlyu/tun2socks/releases/latest/download/$tun_file.zip" -o "$TMP_TUN/tun.zip" 2>/dev/null; then
-    unzip -o "$TMP_TUN/tun.zip" -d "$TMP_TUN/" 2>/dev/null || true
-    local found=$(find "$TMP_TUN" -name "tun2socks*" -type f | head -1)
-    if [[ -n "$found" ]]; then
-      cp "$found" "$JNILIBS_DIR/$abi/libtun2socks.so"
-      chmod +x "$JNILIBS_DIR/$abi/libtun2socks.so"
-      ok "tun2socks → $JNILIBS_DIR/$abi/libtun2socks.so"
-    fi
-  else
-    warn "Пропуск tun2socks для $abi"
+  
+  # Стриппинг других библиотек если они есть (например sing-box)
+  if [[ -f "$JNILIBS_DIR/$abi/libsing-box.so" ]]; then
+    strip_binary "$JNILIBS_DIR/$abi/libsing-box.so"
   fi
-  rm -rf "$TMP_TUN"
+
+  rm -rf "$TMP_XRAY"
+}
+
+download_tun2socks_binaries() {
+  mkdir -p "$LIBS_DIR"
+  log "Проверяем наличие teapod-tun2socks..."
+
+  local latest_info=""
+
+  for abi in "${ALL_ABIS[@]}"; do
+    local found=0
+    # 1. Проверка локальной папки
+    if [[ -d "$LOCAL_TUN2SOCKS_DIR" ]]; then
+      local local_file=$(ls "$LOCAL_TUN2SOCKS_DIR"/teapod-tun2socks-"$abi"-*.aar 2>/dev/null | sort -V | tail -1)
+      if [[ -n "$local_file" ]]; then
+        cp "$local_file" "$LIBS_DIR/teapod-tun2socks-$abi.aar"
+        ok "Локальный AAR ($abi) скопирован из $(basename "$local_file")"
+        found=1
+      fi
+    fi
+
+    # 2. Если не найдено локально, качаем с GitHub
+    if [[ $found -eq 0 ]]; then
+      # Получаем инфо о релизе один раз
+      if [[ -z "$latest_info" ]]; then
+        log "Запрос данных о последнем релизе $TUN2SOCKS_REPO..."
+        latest_info=$(curl -s "https://api.github.com/repos/$TUN2SOCKS_REPO/releases/latest")
+      fi
+
+      local tag=$(echo "$latest_info" | grep '"tag_name":' | cut -d'"' -f4)
+      local download_url=$(echo "$latest_info" | grep "browser_download_url" | grep "$abi" | cut -d'"' -f4 | head -1)
+
+      if [[ -n "$download_url" ]]; then
+        log "Скачиваем teapod-tun2socks ($abi) версия $tag..."
+        curl -L --progress-bar "$download_url" -o "$LIBS_DIR/teapod-tun2socks-$abi.aar"
+        # Для AAR стриппинг сложнее, но можно попробовать распаковать и почистить
+        # (На данный момент считаем что библиотека собрана верно)
+        ok "Скачан AAR ($abi) версия $tag"
+        found=1
+      else
+        warn "Не удалось найти ссылку для скачивания $abi в релизе $tag"
+      fi
+    fi
+
+    if [[ $found -eq 0 ]]; then
+      warn "Не удалось найти библиотеку teapod-tun2socks для $abi"
+    fi
+  done
 }
 
 download_binaries() {
+  log "Очистка управляемых бинарников..."
+  # Удаляем только libxray.so (его мы точно скачаем), остальные оставляем для стриппинга
+  find "$JNILIBS_DIR" -type f -name "libxray.so" -delete
+  
   local ASSETS_BIN="assets/binaries"
-  if [[ -d "$ASSETS_BIN" ]]; then
-    log "Очистка старых бинарников из ассетов..."
-    find "$ASSETS_BIN" -type f ! -name "*.dat" -delete
-  fi
+  log "Очистка старых бинарников из ассетов..."
+  find "$ASSETS_BIN" -type f ! -name "*.dat" -delete
 
   for abi in "${ALL_ABIS[@]}"; do
     download_abi_binaries "$abi"
   done
+
+  download_tun2socks_binaries
 
   mkdir -p "$ASSETS_BIN"
   log "Скачиваем geoip.dat..."
@@ -184,7 +250,30 @@ case "${1:-help}" in
     log "Сборка RELEASE APK (arm64 + x86_64)..."
     accept_sdk_licenses
     check_binaries true || true
-    flutter build apk --release --split-per-abi --target-platform android-arm64,android-x64
+    
+    # Сборка по очереди для каждой архитектуры, чтобы избежать конфликта AAR в Gradle
+    # (каждый AAR содержит те же Kotlin-классы, что вызывает ошибку Duplicate class в Gradle)
+    dir="build/app/outputs/flutter-apk"
+    
+    # Удаляем старые APK перед сборкой
+    rm -f "$dir"/app-*-release.apk
+    
+    for plat in android-arm64 android-x64; do
+      abi="arm64-v8a"
+      [[ "$plat" == "android-x64" ]] && abi="x86_64"
+      
+      log "Сборка архитектуры: $abi ($plat)..."
+      flutter build apk --release --target-platform "$plat" --no-pub
+      
+      # Flutter создает файл app-release.apk. Переименуем его в формат, ожидаемый rename_apks
+      if [[ -f "$dir/app-release.apk" ]]; then
+        mv "$dir/app-release.apk" "$dir/app-$abi-release.apk"
+        ok "Сборка $abi завершена"
+      else
+        err "Ошибка: файл $dir/app-release.apk не был создан для $abi"
+      fi
+    done
+
     rename_apks
     ;;
 
@@ -260,7 +349,7 @@ case "${1:-help}" in
     echo "  TeapodStream build script"
     echo ""
     echo "  Команды:"
-    echo "    ./build.sh binaries     Скачать xray, tun2socks, geodata"
+    echo "    ./build.sh binaries     Скачать xray, geodata"
     echo "    ./build.sh debug        Собрать debug APK"
     echo "    ./build.sh release      Собрать release APK (split per ABI)"
     echo "    ./build.sh aab          Собрать AAB"
