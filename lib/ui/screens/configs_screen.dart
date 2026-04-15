@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/models/vpn_config.dart';
 import '../../core/services/config_storage_service.dart';
+import '../../core/services/subscription_service.dart';
 import '../../protocols/xray/vless_parser.dart';
 import '../../providers/config_provider.dart';
 import '../../providers/vpn_provider.dart';
@@ -269,7 +270,7 @@ class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
   }
 
   Future<void> _refreshSubscription(
-    BuildContext context, WidgetRef ref, Subscription sub) async {
+    BuildContext context, WidgetRef ref, Subscription sub, {bool allowSelfSigned = false}) async {
     showDialog(
       context: context,
       barrierDismissible: false,
@@ -277,12 +278,54 @@ class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
     );
 
     try {
-      await ref.read(configProvider.notifier).addSubscriptionFromUrl(sub.url, name: sub.name);
+      await ref.read(configProvider.notifier).addSubscriptionFromUrl(
+        sub.url,
+        name: sub.name,
+        allowSelfSigned: allowSelfSigned,
+      );
       if (context.mounted) {
         Navigator.pop(context);
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('Подписка обновлена')),
         );
+      }
+    } on UntrustedCertificateException catch (e) {
+      if (!context.mounted) return;
+      Navigator.pop(context); // close loading spinner
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('Ненадёжный сертификат'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Сервер использует самоподписанный или неизвестный сертификат. '
+                'Соединение может быть небезопасным.',
+              ),
+              const SizedBox(height: 12),
+              Text('Сервер: ${e.host}', style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+              Text('Сертификат: ${e.subject}', style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+              Text('Издатель: ${e.issuer}', style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+              const SizedBox(height: 12),
+              const Text('Продолжить всё равно?'),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Отмена'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Продолжить'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed == true && context.mounted) {
+        await _refreshSubscription(context, ref, sub, allowSelfSigned: true);
       }
     } catch (e) {
       if (context.mounted) {

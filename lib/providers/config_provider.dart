@@ -104,7 +104,7 @@ class ConfigNotifier extends AsyncNotifier<ConfigState> {
 
   // ─── Subscription methods ───
 
-  Future<void> addSubscriptionFromUrl(String url, {String? name}) async {
+  Future<void> addSubscriptionFromUrl(String url, {String? name, bool allowSelfSigned = false}) async {
     final current = state.maybeWhen(data: (d) => d, orElse: () => null) ?? const ConfigState();
     final existing = current.subscriptions.where((s) => s.url == url).toList();
 
@@ -118,7 +118,7 @@ class ConfigNotifier extends AsyncNotifier<ConfigState> {
       for (final old in oldConfigs) {
         await storage.removeConfig(old.id);
       }
-      newConfigs = await _fetchAndTagConfigs(url, subId);
+      newConfigs = await _fetchAndTagConfigs(url, subId, allowSelfSigned: allowSelfSigned);
 
       final updatedSub = existing.first.copyWith(name: name ?? existing.first.name);
       // lastFetchedAt updated in fetch
@@ -149,7 +149,7 @@ class ConfigNotifier extends AsyncNotifier<ConfigState> {
     } else {
       // New subscription
       subId = 'sub_${DateTime.now().millisecondsSinceEpoch}';
-      newConfigs = await _fetchAndTagConfigs(url, subId);
+      newConfigs = await _fetchAndTagConfigs(url, subId, allowSelfSigned: allowSelfSigned);
 
       final sub = Subscription(
         id: subId,
@@ -172,9 +172,9 @@ class ConfigNotifier extends AsyncNotifier<ConfigState> {
     }
   }
 
-  Future<List<VpnConfig>> _fetchAndTagConfigs(String url, String subId) async {
+  Future<List<VpnConfig>> _fetchAndTagConfigs(String url, String subId, {bool allowSelfSigned = false}) async {
     final svc = SubscriptionService();
-    final rawConfigs = await svc.fetchSubscription(url);
+    final rawConfigs = await svc.fetchSubscription(url, allowSelfSigned: allowSelfSigned);
     final tagged = rawConfigs.map((c) => VpnConfig(
       id: c.id,
       name: c.name,
@@ -188,15 +188,21 @@ class ConfigNotifier extends AsyncNotifier<ConfigState> {
       wsPath: c.wsPath,
       wsHost: c.wsHost,
       grpcServiceName: c.grpcServiceName,
+      fingerprint: c.fingerprint,
       publicKey: c.publicKey,
       shortId: c.shortId,
       spiderX: c.spiderX,
+      postQuantumKey: c.postQuantumKey,
       flow: c.flow,
       encryption: c.encryption,
+      alterId: c.alterId,
+      method: c.method,
+      password: c.password,
       createdAt: c.createdAt,
       rawUri: c.rawUri,
       latencyMs: c.latencyMs,
       subscriptionId: subId,
+      ssPrefix: c.ssPrefix,
     )).toList();
 
     for (final c in tagged) {

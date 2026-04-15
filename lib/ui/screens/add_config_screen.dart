@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/services/subscription_service.dart';
 import '../../protocols/xray/vless_parser.dart';
 import '../../providers/config_provider.dart';
 import '../theme/app_colors.dart';
@@ -116,14 +117,17 @@ class _AddConfigScreenState extends ConsumerState<AddConfigScreen> {
     await _processUri(text);
   }
 
-  Future<void> _processUri(String uri) async {
+  Future<void> _processUri(String uri, {bool allowSelfSigned = false}) async {
     setState(() { _loading = true; _error = null; });
     try {
       final parsed = Uri.parse(uri);
 
       if (parsed.scheme == 'http' || parsed.scheme == 'https') {
         // Subscription URL
-        await ref.read(configProvider.notifier).addSubscriptionFromUrl(uri);
+        await ref.read(configProvider.notifier).addSubscriptionFromUrl(
+          uri,
+          allowSelfSigned: allowSelfSigned,
+        );
         if (mounted) Navigator.pop(context);
       } else {
         // Single config URI
@@ -136,10 +140,53 @@ class _AddConfigScreenState extends ConsumerState<AddConfigScreen> {
         }
         setState(() => _error = 'Не удалось распознать конфигурацию. Поддерживаются: vless://, vmess://, trojan://, ss://');
       }
+    } on UntrustedCertificateException catch (e) {
+      setState(() => _loading = false);
+      if (!mounted) return;
+      final confirmed = await _showUntrustedCertDialog(e);
+      if (confirmed == true && mounted) {
+        await _processUri(uri, allowSelfSigned: true);
+      }
+      return;
     } catch (e) {
       setState(() => _error = 'Ошибка: $e');
     } finally {
       if (mounted) setState(() => _loading = false);
     }
+  }
+
+  Future<bool?> _showUntrustedCertDialog(UntrustedCertificateException e) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Ненадёжный сертификат'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'Сервер использует самоподписанный или неизвестный сертификат. '
+              'Соединение может быть небезопасным.',
+            ),
+            const SizedBox(height: 12),
+            Text('Сервер: ${e.host}', style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+            Text('Сертификат: ${e.subject}', style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+            Text('Издатель: ${e.issuer}', style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
+            const SizedBox(height: 12),
+            const Text('Продолжить всё равно?'),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Продолжить'),
+          ),
+        ],
+      ),
+    );
   }
 }
