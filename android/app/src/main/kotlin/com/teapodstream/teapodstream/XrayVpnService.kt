@@ -542,10 +542,6 @@ class XrayVpnService : VpnService() {
     }
 
     private fun startStatsMonitoring() {
-        // Capture baseline TrafficStats at connection time
-        baseUpload = TrafficStats.getUidTxBytes(applicationInfo.uid).coerceAtLeast(0)
-        baseDownload = TrafficStats.getUidRxBytes(applicationInfo.uid).coerceAtLeast(0)
-
         var lastUp = 0L
         var lastDown = 0L
         var lastTime = System.currentTimeMillis()
@@ -562,11 +558,9 @@ class XrayVpnService : VpnService() {
                     val now = System.currentTimeMillis()
                     val elapsed = (now - lastTime) / 1000.0
 
-                    // Get current TrafficStats and subtract baseline
-                    val rawTx = TrafficStats.getUidTxBytes(applicationInfo.uid).coerceAtLeast(0)
-                    val rawRx = TrafficStats.getUidRxBytes(applicationInfo.uid).coerceAtLeast(0)
-                    val currentTx = (rawTx - baseUpload).coerceAtLeast(0)
-                    val currentRx = (rawRx - baseDownload).coerceAtLeast(0)
+                    // Get perfectly accurate bytes directly from teapod-tun2socks!
+                    val currentTx = teapodVpnManager?.getUploadBytes() ?: 0L
+                    val currentRx = teapodVpnManager?.getDownloadBytes() ?: 0L
 
                     totalUpload = currentTx
                     totalDownload = currentRx
