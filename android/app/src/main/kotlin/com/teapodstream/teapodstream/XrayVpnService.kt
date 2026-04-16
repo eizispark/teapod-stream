@@ -652,14 +652,14 @@ class XrayVpnService : VpnService() {
             // In Android 10+, cm.activeNetwork returns the VPN network itself if active.
             // We must set the REAL underlying network (WiFi/LTE) to avoid status bar glitches.
             val caps = cm.getNetworkCapabilities(activeNetwork)
-            if (caps == null || caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_VPN)) {
+            if (caps == null || caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
                 // Active is VPN or unknown — look for the best physical internet network
                 val allNetworks = try { cm.allNetworks } catch (e: Exception) { emptyArray<Network>() }
                 var physicalNetwork: Network? = null
                 for (nw in allNetworks) {
                     val c = cm.getNetworkCapabilities(nw) ?: continue
                     if (c.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) &&
-                        !c.hasCapability(NetworkCapabilities.NET_CAPABILITY_VPN)) {
+                        !c.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) {
                         physicalNetwork = nw
                         break
                     }
