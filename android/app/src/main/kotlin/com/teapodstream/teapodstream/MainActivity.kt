@@ -4,6 +4,7 @@ import android.app.Activity
 import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.drawable.Drawable
+import android.net.Uri
 import android.net.VpnService
 import android.os.Build
 import android.util.Base64
@@ -85,16 +86,16 @@ class MainActivity : FlutterActivity() {
                     }
 
                     "isBinaryReady" -> {
-                        val xray = java.io.File(applicationInfo.nativeLibraryDir, "libxray.so")
                         val geoip = java.io.File(filesDir, "geoip.dat")
                         val geosite = java.io.File(filesDir, "geosite.dat")
-                        
+
                         // If geodata is missing, try to extract it now (it's fast)
                         if (!geoip.exists() || !geosite.exists()) {
                             XrayVpnService.prepareBinaries(this)
                         }
-                        
-                        result.success(xray.exists() && geoip.exists() && geosite.exists())
+
+                        // teapod-core is an AAR library — no separate binary needed
+                        result.success(geoip.exists() && geosite.exists())
                     }
 
                     "prepareBinaries" -> {
@@ -130,6 +131,37 @@ class MainActivity : FlutterActivity() {
 
                     "getState" -> {
                         result.success(XrayVpnService.getNativeState())
+                    }
+
+                    "installApk" -> {
+                        val filePath = call.argument<String>("filePath") ?: run {
+                            result.error("INVALID_ARGS", "filePath required", null)
+                            return@setMethodCallHandler
+                        }
+                        val file = java.io.File(filePath)
+                        if (!file.exists()) {
+                            result.error("FILE_NOT_FOUND", "APK not found: $filePath", null)
+                            return@setMethodCallHandler
+                        }
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+                            !packageManager.canRequestPackageInstalls()) {
+                            val intent = Intent(
+                                android.provider.Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:$packageName")
+                            )
+                            startActivity(intent)
+                            result.error("PERMISSION_REQUIRED", "Install unknown apps permission needed", null)
+                            return@setMethodCallHandler
+                        }
+                        val uri = androidx.core.content.FileProvider.getUriForFile(
+                            this, "$packageName.fileprovider", file
+                        )
+                        val intent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(uri, "application/vnd.android.package-archive")
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_GRANT_READ_URI_PERMISSION
+                        }
+                        startActivity(intent)
+                        result.success(null)
                     }
 
                     else -> result.notImplemented()
@@ -204,7 +236,11 @@ class MainActivity : FlutterActivity() {
         val intent = Intent(this, XrayVpnService::class.java).apply {
             action = XrayVpnService.ACTION_DISCONNECT
         }
-        startService(intent)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
     }
 
     private fun pingHost(address: String, port: Int): Int? {
@@ -258,18 +294,8 @@ class MainActivity : FlutterActivity() {
     private fun getBinaryVersions(): Map<String, String> {
         val versions = mutableMapOf<String, String>()
         try {
-            val libDir = applicationInfo.nativeLibraryDir
-
-            // Xray version
-            val xrayBin = "$libDir/libxray.so"
-            val xrayProc = ProcessBuilder(xrayBin, "-version").start()
-            val xrayOut = xrayProc.inputStream.bufferedReader().readText().trim()
-            versions["xray"] = xrayOut.lines().firstOrNull()?.split(" ")?.getOrNull(1) ?: "Unknown"
-            xrayProc.waitFor()
-
-            // Teapod-tun2socks version (from AAR package)
-            // Version is embedded in the AAR, we can get it from the package
-            versions["tun2socks"] = "teapod-tun2socks (AAR)"
+            versions["xray"] = teapodcore.Teapodcore.getXrayVersion()
+            versions["tun2socks"] = "teapod-core (AAR)"
         } catch (e: Exception) {
             versions["xray"] = "Error"
             versions["tun2socks"] = "Error"

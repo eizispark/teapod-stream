@@ -15,11 +15,14 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.system.OsConstants
-import android.net.TrafficStats
 import androidx.core.app.NotificationCompat
 import java.io.File
-import com.teapodstream.tun2socks.TeapodVpnManager
-import com.teapodstream.tun2socks.WhitelistMode
+import java.net.InetSocketAddress
+import java.util.concurrent.atomic.AtomicBoolean
+import teapodcore.Teapodcore
+import teapodcore.XrayCallback
+import teapodcore.TunValidator
+import teapodcore.VpnProtector
 
 class XrayVpnService : VpnService() {
 
@@ -28,7 +31,6 @@ class XrayVpnService : VpnService() {
             System.loadLibrary("vpnhelper")
         }
 
-        @JvmStatic external fun nativeKillProcess(pid: Long): Int
         @JvmStatic external fun nativeSetMaxFds(maxFds: Int): Int
         const val ACTION_CONNECT = "com.teapodstream.CONNECT"
         const val ACTION_DISCONNECT = "com.teapodstream.DISCONNECT"
@@ -56,8 +58,6 @@ class XrayVpnService : VpnService() {
         @Volatile private var totalDownload: Long = 0
         @Volatile private var lastUploadSpeed: Long = 0
         @Volatile private var lastDownloadSpeed: Long = 0
-        @Volatile private var baseUpload: Long = 0
-        @Volatile private var baseDownload: Long = 0
 
         fun getStats(): Map<String, Long> = mapOf(
             "upload" to totalUpload,
@@ -67,7 +67,6 @@ class XrayVpnService : VpnService() {
         )
 
         fun prepareBinaries(context: android.content.Context): Boolean {
-            val abi = android.os.Build.SUPPORTED_ABIS.firstOrNull() ?: "arm64-v8a"
             val filesDir = context.filesDir
             val assets = context.assets
             val assetsToCopy = listOf("geoip.dat", "geosite.dat")
@@ -84,9 +83,6 @@ class XrayVpnService : VpnService() {
     }
 
     private var tunInterface: ParcelFileDescriptor? = null
-    private var xrayProcess: Process? = null
-    private var xrayPid: Long = -1L
-    private var teapodVpnManager: TeapodVpnManager? = null
     private var statsThread: Thread? = null
     private var isRunning = false
     private var networkCallback: ConnectivityManager.NetworkCallback? = null
@@ -102,10 +98,33 @@ class XrayVpnService : VpnService() {
     private val tunMtu    = 9000
     private val tunDns    = "1.1.1.1"
 
+    override fun onCreate() {
+        super.onCreate()
+        // Register VPN socket protector so xray-core sockets bypass the tunnel (prevents routing loop).
+        // Done once at service creation — protect() is always valid while service is alive.
+        Teapodcore.registerVpnProtector(object : VpnProtector {
+            override fun protect(fd: Long): Boolean = this@XrayVpnService.protect(fd.toInt())
+        })
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_DISCONNECT -> {
-                stopVpn()
+                // Signal disconnecting immediately so the button turns yellow
+                // even when triggered from the notification (no Flutter-side handler).
+                if (isRunning) {
+                    currentNativeState = "disconnecting"
+                    VpnEventStreamHandler.sendStateEvent("disconnecting")
+                }
+                // Run cleanup off the main thread — Go calls (stopTun2Socks/stopXray)
+                // can block if goroutines are stuck after long uptime or network changes.
+                Thread {
+                    stopVpn()
+                    // Guarantee "disconnected" is always sent — even if stopVpn() was
+                    // a no-op (isRunning was already false when the intent arrived).
+                    currentNativeState = "disconnected"
+                    VpnEventStreamHandler.sendStateEvent("disconnected")
+                }.start()
                 // Keep the service alive as foreground with a "Connect" notification.
                 // This lets users reconnect from the shade without opening the app.
                 showDisconnectedNotification()
@@ -126,8 +145,11 @@ class XrayVpnService : VpnService() {
                 saveConnectionParams(socksPort, socksUser, socksPassword,
                     excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly, showNotification)
                 ensureForeground()
-                startVpn(xrayConfig, socksPort, socksUser, socksPassword,
-                    excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly)
+                // startVpn blocks (waits up to 3s for xray + establishes TUN) — run off main thread.
+                Thread {
+                    startVpn(xrayConfig, socksPort, socksUser, socksPassword,
+                        excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly)
+                }.start()
                 return START_STICKY
             }
             ACTION_CONNECT_QUICK -> {
@@ -140,12 +162,19 @@ class XrayVpnService : VpnService() {
                     if (needsPermission) {
                         openApp()
                     } else {
-                        startVpn(
-                            configFile.readText(),
-                            params.socksPort, params.socksUser, params.socksPassword,
-                            params.excludedPackages, params.includedPackages, params.vpnMode,
-                            params.ssPrefix, params.proxyOnly
-                        )
+                        // Signal connecting immediately so the button turns yellow
+                        // before startVpn() begins its work.
+                        currentNativeState = "connecting"
+                        VpnEventStreamHandler.sendStateEvent("connecting")
+                        val configText = configFile.readText()
+                        Thread {
+                            startVpn(
+                                configText,
+                                params.socksPort, params.socksUser, params.socksPassword,
+                                params.excludedPackages, params.includedPackages, params.vpnMode,
+                                params.ssPrefix, params.proxyOnly
+                            )
+                        }.start()
                     }
                 } else {
                     // No saved params yet — open app so the user can connect normally
@@ -240,12 +269,11 @@ class XrayVpnService : VpnService() {
         if (isRunning) return
         isRunning = true
         currentNativeState = "connecting"
-            VpnEventStreamHandler.sendStateEvent("connecting")
+        VpnEventStreamHandler.sendStateEvent("connecting")
         log("info", "Starting VPN")
 
         try {
             // Enable prefix proxy only when the ss:// URL contains ?prefix=.
-            // That parameter signals the server supports Outline prefix-stripping.
             val finalConfig = if (ssPrefix != null) {
                 injectPrefixProxy(xrayConfig, ssPrefix) ?: xrayConfig
             } else {
@@ -256,31 +284,16 @@ class XrayVpnService : VpnService() {
             configFile.writeText(finalConfig)
             prepareBinaries(this)
 
+            // Set up xray asset path before starting
+            Teapodcore.initCoreEnv(filesDir.absolutePath, "")
+
             if (proxyOnly) {
                 // Proxy-only mode: start Xray SOCKS proxy without TUN tunnel or tun2socks
                 log("info", "Proxy-only mode: skipping TUN tunnel")
 
-                val xrayBin = File(applicationInfo.nativeLibraryDir, "libxray.so")
-                val xrayPb = ProcessBuilder(xrayBin.absolutePath, "run", "-c", configFile.absolutePath)
-                xrayPb.environment()["XRAY_LOCATION_ASSET"] = filesDir.absolutePath
-                xrayPb.redirectErrorStream(true)
-                xrayProcess = xrayPb.start()
+                startXrayAndWait(finalConfig)
 
-                Thread {
-                    try {
-                        xrayProcess?.inputStream?.bufferedReader()?.forEachLine { line ->
-                            log("debug", "[xray] $line")
-                        }
-                    } catch (_: Exception) {}
-                }.also { it.isDaemon = true; it.name = "xray-log"; it.start() }
-
-                Thread.sleep(800)
-
-                if (!isProcessAlive(xrayProcess)) {
-                    throw IllegalStateException("xray process died on startup")
-                }
                 log("info", "xray started (proxy-only, SOCKS on port $socksPort)")
-
                 startStatsMonitoring()
                 currentNativeState = "connected"
                 VpnEventStreamHandler.sendStateEvent("connected")
@@ -298,7 +311,7 @@ class XrayVpnService : VpnService() {
 
                 // On Android 8+, set underlying networks for better routing
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                    val connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as android.net.ConnectivityManager
+                    val connectivityManager = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
                     val activeNetwork = connectivityManager.activeNetwork
                     if (activeNetwork != null) {
                         builder.setUnderlyingNetworks(arrayOf(activeNetwork))
@@ -332,91 +345,31 @@ class XrayVpnService : VpnService() {
                 }
 
                 val fdResult = nativeSetMaxFds(65536)
-                log("info", "nativeSetMaxFds result (parent): $fdResult")
+                log("info", "nativeSetMaxFds result: $fdResult")
 
                 tunInterface = builder.establish() ?: throw IllegalStateException("Failed to establish TUN")
-
                 log("info", "TUN established")
 
-                // 1. Start Xray directly (FD limit set by parent process)
-                val xrayBin = File(applicationInfo.nativeLibraryDir, "libxray.so")
-                val xrayPb = ProcessBuilder(xrayBin.absolutePath, "run", "-c", configFile.absolutePath)
-                xrayPb.environment()["XRAY_LOCATION_ASSET"] = filesDir.absolutePath
-                xrayPb.redirectErrorStream(true)
-                xrayProcess = xrayPb.start()
-
-                Thread {
-                    try {
-                        xrayProcess?.inputStream?.bufferedReader()?.forEachLine { line ->
-                            log("debug", "[xray] $line")
-                        }
-                    } catch (_: Exception) {}
-                }.also { it.isDaemon = true; it.name = "xray-log"; it.start() }
-
-                Thread.sleep(800)
-
-                if (!isProcessAlive(xrayProcess)) {
-                    throw IllegalStateException("xray process died on startup")
-                }
+                // 1. Start xray-core (in-process library, not subprocess)
+                startXrayAndWait(finalConfig)
                 log("info", "xray started")
 
-                // 2. Start teapod-tun2socks (with strict split-tunneling UID validation)
-                teapodVpnManager = TeapodVpnManager(this)
+                // 2. Resolve UIDs for split tunneling (tun2socks validator level)
+                val allowedUids = resolveUids(vpnMode, includedPackages, excludedPackages)
+                val validator = buildTunValidator(allowedUids, vpnMode)
 
-                // Convert package names to UIDs for split tunneling
-                val allowedUids = mutableSetOf<Int>()
-                val whitelistMode = when (vpnMode) {
-                    "onlySelected" -> {
-                        // Only selected apps go through VPN
-                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-                            for (pkg in includedPackages) {
-                                try {
-                                    val uid = packageManager.getPackageUid(pkg, PackageManager.GET_META_DATA)
-                                    allowedUids.add(uid)
-                                    log("info", "Allowed UID for $pkg: $uid")
-                                } catch (e: Exception) {
-                                    log("warning", "Failed to get UID for $pkg: ${e.message}")
-                                }
-                            }
-                        }
-                        WhitelistMode.ALLOW_ONLY
-                    }
-                    else -> {
-                        // All apps go through VPN, except excluded
-                        for (pkg in excludedPackages) {
-                            try {
-                                val uid = packageManager.getPackageUid(pkg, PackageManager.GET_META_DATA)
-                                allowedUids.add(uid)
-                                log("info", "Excluded UID for $pkg: $uid")
-                            } catch (e: Exception) {
-                                log("warning", "Failed to get UID for $pkg: ${e.message}")
-                            }
-                        }
-                        // Always exclude own app to prevent routing loops
-                        try {
-                            val uid = packageManager.getPackageUid(packageName, PackageManager.GET_META_DATA)
-                            allowedUids.add(uid)
-                            log("info", "Excluded own UID ($packageName): $uid")
-                        } catch (e: Exception) {
-                            log("warning", "Failed to get own UID: ${e.message}")
-                        }
-                        WhitelistMode.DENY_ONLY
-                    }
-                }
+                log("info", "Starting tun2socks: mode=$vpnMode uids=${allowedUids.size}")
 
-                log("info", "Starting teapod-tun2socks: mode=$whitelistMode uids=${allowedUids.size}")
-
-                teapodVpnManager!!.start(
-                    tunFd = tunInterface!!,
-                    socksHost = "127.0.0.1",
-                    socksPort = socksPort,
-                    socksUsername = socksUser,
-                    socksPassword = socksPassword,
-                    allowedUids = allowedUids,
-                    whitelistMode = whitelistMode
+                val tunErr = Teapodcore.startTun2Socks(
+                    tunInterface!!.fd.toLong(),
+                    socksPort.toLong(),
+                    socksUser,
+                    socksPassword,
+                    validator
                 )
+                if (tunErr.isNotEmpty()) throw IllegalStateException("tun2socks: $tunErr")
 
-                log("info", "teapod-tun2socks started successfully")
+                log("info", "tun2socks started successfully")
 
                 startStatsMonitoring()
                 registerNetworkCallback()
@@ -426,20 +379,92 @@ class XrayVpnService : VpnService() {
             }
         } catch (e: Exception) {
             log("error", "Start failed: ${e.message}")
-            currentNativeState = "error"
-            VpnEventStreamHandler.sendStateEvent("error")
-            stopVpn()
+            stopVpn(resultState = "error")
         }
     }
 
-    /** Returns true if the process is still running. Uses exitValue() for API < 26 compatibility. */
-    private fun isProcessAlive(p: Process?): Boolean {
-        p ?: return false
-        return try {
-            p.exitValue()
-            false  // process has exited
-        } catch (_: IllegalThreadStateException) {
-            true   // still running
+    /**
+     * Starts xray-core and blocks until it reports ready or fails (max 3 s).
+     * Throws IllegalStateException if xray reports an error status.
+     */
+    private fun startXrayAndWait(config: String) {
+        val ready = AtomicBoolean(false)
+        val failed = AtomicBoolean(false)
+
+        Teapodcore.startXray(config, object : XrayCallback {
+            override fun onStatus(status: Long, message: String) {
+                log("info", "[xray] $message")
+                if (status == 0L) ready.set(true) else failed.set(true)
+            }
+        })
+
+        val deadline = System.currentTimeMillis() + 3000
+        while (!ready.get() && !failed.get() && System.currentTimeMillis() < deadline) {
+            Thread.sleep(50)
+        }
+        if (failed.get()) throw IllegalStateException("xray failed to start")
+        if (!ready.get()) throw IllegalStateException("xray start timeout (3s)")
+    }
+
+    /**
+     * Resolves UIDs for the given package lists based on vpnMode.
+     * In "onlySelected" mode returns allowed UIDs; otherwise returns excluded UIDs
+     * (including the app's own UID to prevent routing loops).
+     */
+    private fun resolveUids(
+        vpnMode: String,
+        includedPackages: List<String>,
+        excludedPackages: List<String>,
+    ): Set<Int> {
+        val uids = mutableSetOf<Int>()
+        val packages = if (vpnMode == "onlySelected") includedPackages else excludedPackages
+        for (pkg in packages) {
+            try {
+                val uid = packageManager.getPackageUid(pkg, PackageManager.GET_META_DATA)
+                uids.add(uid)
+                log("info", "${if (vpnMode == "onlySelected") "Allowed" else "Excluded"} UID for $pkg: $uid")
+            } catch (e: Exception) {
+                log("warning", "Failed to get UID for $pkg: ${e.message}")
+            }
+        }
+        if (vpnMode != "onlySelected") {
+            // Always exclude own app to prevent routing loops at tun2socks level
+            try {
+                val uid = packageManager.getPackageUid(packageName, PackageManager.GET_META_DATA)
+                uids.add(uid)
+                log("info", "Excluded own UID ($packageName): $uid")
+            } catch (e: Exception) {
+                log("warning", "Failed to get own UID: ${e.message}")
+            }
+        }
+        return uids
+    }
+
+    /**
+     * Builds a TunValidator that enforces split tunneling using
+     * ConnectivityManager.getConnectionOwnerUid (requires API 29+).
+     */
+    private fun buildTunValidator(allowedUids: Set<Int>, vpnMode: String): TunValidator {
+        if (allowedUids.isEmpty()) {
+            // No UID filtering — allow everything
+            return object : TunValidator {
+                override fun onValidate(srcIP: String, srcPort: Long, dstIP: String, dstPort: Long, protocol: Long) = true
+            }
+        }
+        val cm = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
+        return object : TunValidator {
+            override fun onValidate(srcIP: String, srcPort: Long, dstIP: String, dstPort: Long, protocol: Long): Boolean {
+                return try {
+                    val uid = cm.getConnectionOwnerUid(
+                        protocol.toInt(),
+                        InetSocketAddress(srcIP, srcPort.toInt()),
+                        InetSocketAddress(dstIP, dstPort.toInt())
+                    )
+                    if (vpnMode == "onlySelected") uid in allowedUids else uid !in allowedUids
+                } catch (_: Exception) {
+                    true // allow on lookup failure
+                }
+            }
         }
     }
 
@@ -485,7 +510,7 @@ class XrayVpnService : VpnService() {
         }
     }
 
-    private fun stopVpn() {
+    private fun stopVpn(resultState: String = "disconnected") {
         if (!isRunning) return  // idempotent — safe to call multiple times
         isRunning = false
         lastUnderlyingNetwork = null
@@ -507,21 +532,13 @@ class XrayVpnService : VpnService() {
             }
             prefixProxy = null
 
-            try { teapodVpnManager?.stop() } catch (e: Exception) {
-                log("warning", "teapodVpnManager.stop failed: ${e.message}")
+            try { Teapodcore.stopTun2Socks() } catch (e: Exception) {
+                log("warning", "stopTun2Socks failed: ${e.message}")
             }
-            teapodVpnManager = null
 
-            try {
-                if (xrayPid > 0) {
-                    nativeKillProcess(xrayPid)
-                    xrayPid = -1L
-                }
-                xrayProcess?.destroy()
-            } catch (e: Exception) {
-                log("warning", "xray process kill failed: ${e.message}")
+            try { Teapodcore.stopXray() } catch (e: Exception) {
+                log("warning", "stopXray failed: ${e.message}")
             }
-            xrayProcess = null
 
             try {
                 tunInterface?.close()
@@ -530,9 +547,9 @@ class XrayVpnService : VpnService() {
             }
             tunInterface = null
         } finally {
-            // Always send disconnected — even if cleanup partially failed
-            currentNativeState = "disconnected"
-            VpnEventStreamHandler.sendStateEvent("disconnected")
+            // Always send final state — even if cleanup partially failed
+            currentNativeState = resultState
+            VpnEventStreamHandler.sendStateEvent(resultState)
         }
     }
 
@@ -558,9 +575,8 @@ class XrayVpnService : VpnService() {
                     val now = System.currentTimeMillis()
                     val elapsed = (now - lastTime) / 1000.0
 
-                    // Get perfectly accurate bytes directly from teapod-tun2socks!
-                    val currentTx = teapodVpnManager?.getUploadBytes() ?: 0L
-                    val currentRx = teapodVpnManager?.getDownloadBytes() ?: 0L
+                    val currentTx = Teapodcore.getTunUploadBytes()
+                    val currentRx = Teapodcore.getTunDownloadBytes()
 
                     totalUpload = currentTx
                     totalDownload = currentRx
@@ -590,7 +606,6 @@ class XrayVpnService : VpnService() {
 
                 override fun onLost(network: Network) {
                     log("info", "Network lost: $network")
-                    // Clear cached network so the next available one is applied immediately
                     if (lastUnderlyingNetwork == network) {
                         lastUnderlyingNetwork = null
                     }
@@ -601,9 +616,6 @@ class XrayVpnService : VpnService() {
                     network: Network,
                     networkCapabilities: NetworkCapabilities
                 ) {
-                    // Only act when this IS the active network and transport type changed
-                    // (e.g. WiFi → LTE handover). Using the active network guard avoids
-                    // the Huawei flood of capability events from non-active networks.
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
                         if (cm.activeNetwork == network) {
                             updateUnderlyingNetworks(cm)
@@ -623,9 +635,6 @@ class XrayVpnService : VpnService() {
     private fun updateUnderlyingNetworks(cm: ConnectivityManager) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val activeNetwork = cm.activeNetwork ?: return
-            // Only call setUnderlyingNetworks when the active network identity changed.
-            // This avoids repeated calls on the same network (Huawei capability spam)
-            // while still reacting immediately to WiFi ↔ LTE transitions.
             if (activeNetwork == lastUnderlyingNetwork) return
             lastUnderlyingNetwork = activeNetwork
             setUnderlyingNetworks(arrayOf(activeNetwork))
@@ -739,7 +748,7 @@ class XrayVpnService : VpnService() {
         } catch (_: Exception) {}
     }
 
-    private fun log(level: String, message: String) { 
+    private fun log(level: String, message: String) {
         android.util.Log.i("TeapodVPN", "[$level] $message")
         // Send logs to Flutter UI
         if (level == "error" || level == "info" || (BuildConfig.DEBUG && level == "debug")) {
