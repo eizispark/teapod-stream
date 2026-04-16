@@ -147,9 +147,30 @@ class _SettingsBodyState extends State<_SettingsBody> {
 
   @override
   Widget build(BuildContext context) {
-    return ListView(
-      padding: const EdgeInsets.all(16),
+    return Column(
       children: [
+        if (widget.isConnected)
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            color: AppColors.connecting.withValues(alpha: 0.1),
+            child: Row(
+              children: const [
+                Icon(Icons.info_outline, color: AppColors.connecting, size: 16),
+                SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    'Настройки нельзя изменить во время подключения',
+                    style: TextStyle(color: AppColors.connecting, fontSize: 13),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        Expanded(
+          child: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
         // Connection section
         _SectionHeader('Подключение'),
         const SizedBox(height: 8),
@@ -188,11 +209,6 @@ class _SettingsBodyState extends State<_SettingsBody> {
             ),
           ],
         ),
-        if (widget.isConnected) ...[
-          const SizedBox(height: 6),
-          const _DisabledNote('Настройки нельзя изменить во время подключения'),
-        ],
-
         const SizedBox(height: 20),
 
         // Xray section
@@ -341,11 +357,6 @@ class _SettingsBodyState extends State<_SettingsBody> {
             ),
           ],
         ),
-        if (widget.isConnected) ...[
-          const SizedBox(height: 6),
-          const _DisabledNote('Настройки Xray нельзя изменить во время подключения'),
-        ],
-
         const SizedBox(height: 20),
 
         // Split tunneling
@@ -400,12 +411,6 @@ class _SettingsBodyState extends State<_SettingsBody> {
             ],
           ],
         ),
-        if (widget.isConnected && widget.settings.splitTunnelingEnabled) ...[
-          const SizedBox(height: 6),
-          const _DisabledNote(
-              'Сплит-туннелирование нельзя изменить во время подключения'),
-        ],
-
         const SizedBox(height: 20),
 
         // Info section
@@ -449,6 +454,9 @@ class _SettingsBodyState extends State<_SettingsBody> {
           ],
         ),
         const SizedBox(height: 32),
+            ],
+          ),
+        ),
       ],
     );
   }

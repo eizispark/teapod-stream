@@ -36,7 +36,6 @@ class LogEntryWidget extends StatelessWidget {
             style: const TextStyle(
               color: AppColors.textDisabled,
               fontSize: 11,
-              fontFamily: 'monospace',
             ),
           ),
           const SizedBox(width: 8),

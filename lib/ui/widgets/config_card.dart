@@ -19,10 +19,10 @@ class ConfigCard extends StatelessWidget {
   });
 
   Color get _protocolColor => switch (config.protocol) {
-        VpnProtocol.vless => AppColors.primary,
-        VpnProtocol.vmess => const Color(0xFFB47FFF),
-        VpnProtocol.trojan => const Color(0xFFFF7F7F),
-        VpnProtocol.shadowsocks => const Color(0xFFFFB74D),
+        VpnProtocol.vless => AppColors.protoVless,
+        VpnProtocol.vmess => AppColors.protoVmess,
+        VpnProtocol.trojan => AppColors.protoTrojan,
+        VpnProtocol.shadowsocks => AppColors.protoShadowsocks,
       };
 
   String get _protocolLabel => switch (config.protocol) {
@@ -164,6 +164,7 @@ class _Tag extends StatelessWidget {
       decoration: BoxDecoration(
         color: AppColors.surfaceHighlight,
         borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: AppColors.border),
       ),
       child: Text(
         label,

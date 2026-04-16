@@ -36,4 +36,10 @@ class AppColors {
   // Charts
   static const chartUpload = Color(0xFF4F9FFF);
   static const chartDownload = Color(0xFF3DD68C);
+
+  // Protocol badges
+  static const protoVless = Color(0xFF4F9FFF);
+  static const protoVmess = Color(0xFFB47FFF);
+  static const protoTrojan = Color(0xFFFF7F7F);
+  static const protoShadowsocks = Color(0xFFFFB74D);
 }
