@@ -2,6 +2,8 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/vpn_log_entry.dart';
 import '../models/dns_config.dart';
 import '../constants/app_constants.dart';
+import 'storage_secure_service.dart';
+import 'storage_migration_service.dart';
 
 /// Режим работы VPN
 enum VpnMode {
@@ -116,16 +118,18 @@ class SettingsService {
   static const _customDnsTypeKey = 'custom_dns_type';
   static const _enableUdpKey = 'enable_udp';
   static const _randomCredentialsKey = 'random_credentials';
-  static const _socksUserKey = 'socks_user';
-  static const _socksPasswordKey = 'socks_password';
   static const _proxyOnlyKey = 'proxy_only';
   static const _showNotificationKey = 'show_notification';
   static const _vpnModeKey = 'vpn_mode';
   static const _includedPackagesKey = 'included_packages';
   static const _killSwitchKey = 'kill_switch';
 
+  final _secure = StorageSecureService();
+
   Future<AppSettings> load() async {
+    await StorageMigrationService.runIfNeeded();
     final prefs = await SharedPreferences.getInstance();
+    final creds = await _secure.readSocksCredentials();
     final excluded = (prefs.getStringList(_excludedPackagesKey) ?? []).toSet();
     final included = (prefs.getStringList(_includedPackagesKey) ?? []).toSet();
     return AppSettings(
@@ -152,8 +156,8 @@ class SettingsService {
       customDnsType: prefs.getString(_customDnsTypeKey) ?? 'udp',
       enableUdp: prefs.getBool(_enableUdpKey) ?? true,
       randomCredentials: prefs.getBool(_randomCredentialsKey) ?? true,
-      socksUser: prefs.getString(_socksUserKey) ?? '',
-      socksPassword: prefs.getString(_socksPasswordKey) ?? '',
+      socksUser: creds.user,
+      socksPassword: creds.password,
       proxyOnly: prefs.getBool(_proxyOnlyKey) ?? false,
       showNotification: prefs.getBool(_showNotificationKey) ?? true,
       killSwitchEnabled: prefs.getBool(_killSwitchKey) ?? false,
@@ -178,10 +182,10 @@ class SettingsService {
     await prefs.setString(_customDnsTypeKey, settings.customDnsType);
     await prefs.setBool(_enableUdpKey, settings.enableUdp);
     await prefs.setBool(_randomCredentialsKey, settings.randomCredentials);
-    await prefs.setString(_socksUserKey, settings.socksUser);
-    await prefs.setString(_socksPasswordKey, settings.socksPassword);
     await prefs.setBool(_proxyOnlyKey, settings.proxyOnly);
     await prefs.setBool(_showNotificationKey, settings.showNotification);
     await prefs.setBool(_killSwitchKey, settings.killSwitchEnabled);
+    // SOCKS credentials go to encrypted storage
+    await _secure.writeSocksCredentials(settings.socksUser, settings.socksPassword);
   }
 }

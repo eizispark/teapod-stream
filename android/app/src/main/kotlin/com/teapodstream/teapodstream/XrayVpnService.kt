@@ -105,11 +105,31 @@ class XrayVpnService : VpnService() {
 
     override fun onCreate() {
         super.onCreate()
-        // Register VPN socket protector so xray-core sockets bypass the tunnel (prevents routing loop).
-        // Done once at service creation — protect() is always valid while service is alive.
+        migrateConnectionParamsIfNeeded()
         Teapodcore.registerVpnProtector(object : VpnProtector {
             override fun protect(fd: Long): Boolean = this@XrayVpnService.protect(fd.toInt())
         })
+    }
+
+    private fun migrateConnectionParamsIfNeeded() {
+        val oldFile = File(filesDir, "last_connection.json")
+        if (!oldFile.exists()) return
+        try {
+            val json = org.json.JSONObject(oldFile.readText())
+            val meta = org.json.JSONObject().apply {
+                put("socksPort", json.optInt("socksPort", 10808))
+                put("excludedPackages", json.optJSONArray("excludedPackages") ?: org.json.JSONArray())
+                put("includedPackages", json.optJSONArray("includedPackages") ?: org.json.JSONArray())
+                put("vpnMode", json.optString("vpnMode", "allExcept"))
+                val ssPrefix = json.optString("ssPrefix")
+                if (ssPrefix.isNotEmpty()) put("ssPrefix", ssPrefix)
+                put("proxyOnly", json.optBoolean("proxyOnly", false))
+                put("showNotification", json.optBoolean("showNotification", true))
+                put("killSwitch", json.optBoolean("killSwitch", false))
+            }
+            File(filesDir, "last_connection_meta.json").writeText(meta.toString())
+        } catch (_: Exception) { }
+        oldFile.delete()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -155,11 +175,10 @@ class XrayVpnService : VpnService() {
                 val ssPrefix = intent.getStringExtra(EXTRA_SS_PREFIX)
                 val proxyOnly = intent.getBooleanExtra(EXTRA_PROXY_ONLY, false)
                 val killSwitch = intent.getBooleanExtra(EXTRA_KILL_SWITCH, false)
-                // Persist dynamic params so ACTION_CONNECT_QUICK can reconnect without the app
-                saveConnectionParams(socksPort, socksUser, socksPassword,
-                    excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly, showNotification, killSwitch)
+                // Persist non-sensitive params for CONNECT_QUICK reconnect (no credentials)
+                saveConnectionParams(socksPort, excludedPackages, includedPackages,
+                    vpnMode, ssPrefix, proxyOnly, showNotification, killSwitch)
                 ensureForeground()
-                // startVpn blocks (waits up to 3s for xray + establishes TUN) — run off main thread.
                 Thread {
                     startVpn(xrayConfig, socksPort, socksUser, socksPassword,
                         excludedPackages, includedPackages, vpnMode, ssPrefix, proxyOnly, killSwitch)
@@ -171,27 +190,25 @@ class XrayVpnService : VpnService() {
                 val configFile = File(filesDir, "xray_config.json")
                 if (params != null && configFile.exists()) {
                     showNotification = params.showNotification
-                    // Check VPN permission only for tunnel mode (proxy-only doesn't need it)
                     val needsPermission = !params.proxyOnly && VpnService.prepare(this) != null
                     if (needsPermission) {
                         openApp()
                     } else {
-                        // Signal connecting immediately so the button turns yellow
-                        // before startVpn() begins its work.
                         currentNativeState = "connecting"
                         VpnEventStreamHandler.sendStateEvent("connecting")
                         val configText = configFile.readText()
+                        // Extract SOCKS credentials from the saved xray config instead of storing them
+                        val (socksUser, socksPassword) = extractSocksFromConfig(configText)
                         Thread {
                             startVpn(
                                 configText,
-                                params.socksPort, params.socksUser, params.socksPassword,
+                                params.socksPort, socksUser, socksPassword,
                                 params.excludedPackages, params.includedPackages, params.vpnMode,
                                 params.ssPrefix, params.proxyOnly, params.killSwitch
                             )
                         }.start()
                     }
                 } else {
-                    // No saved params yet — open app so the user can connect normally
                     openApp()
                 }
                 return START_STICKY
@@ -208,8 +225,6 @@ class XrayVpnService : VpnService() {
 
     private data class ConnectionParams(
         val socksPort: Int,
-        val socksUser: String,
-        val socksPassword: String,
         val excludedPackages: List<String>,
         val includedPackages: List<String>,
         val vpnMode: String,
@@ -220,7 +235,7 @@ class XrayVpnService : VpnService() {
     )
 
     private fun saveConnectionParams(
-        socksPort: Int, socksUser: String, socksPassword: String,
+        socksPort: Int,
         excludedPackages: List<String>, includedPackages: List<String>,
         vpnMode: String, ssPrefix: String?, proxyOnly: Boolean, showNotification: Boolean,
         killSwitch: Boolean,
@@ -228,8 +243,6 @@ class XrayVpnService : VpnService() {
         try {
             val json = org.json.JSONObject().apply {
                 put("socksPort", socksPort)
-                put("socksUser", socksUser)
-                put("socksPassword", socksPassword)
                 put("excludedPackages", org.json.JSONArray(excludedPackages))
                 put("includedPackages", org.json.JSONArray(includedPackages))
                 put("vpnMode", vpnMode)
@@ -238,7 +251,7 @@ class XrayVpnService : VpnService() {
                 put("showNotification", showNotification)
                 put("killSwitch", killSwitch)
             }
-            File(filesDir, "last_connection.json").writeText(json.toString())
+            File(filesDir, "last_connection_meta.json").writeText(json.toString())
         } catch (e: Exception) {
             log("warning", "Failed to save connection params: ${e.message}")
         }
@@ -246,7 +259,7 @@ class XrayVpnService : VpnService() {
 
     private fun loadConnectionParams(): ConnectionParams? {
         return try {
-            val text = File(filesDir, "last_connection.json").readText()
+            val text = File(filesDir, "last_connection_meta.json").readText()
             val json = org.json.JSONObject(text)
             val excluded = json.getJSONArray("excludedPackages")
                 .let { arr -> List(arr.length()) { arr.getString(it) } }
@@ -254,8 +267,6 @@ class XrayVpnService : VpnService() {
                 .let { arr -> List(arr.length()) { arr.getString(it) } }
             ConnectionParams(
                 socksPort = json.getInt("socksPort"),
-                socksUser = json.getString("socksUser"),
-                socksPassword = json.getString("socksPassword"),
                 excludedPackages = excluded,
                 includedPackages = included,
                 vpnMode = json.optString("vpnMode", "allExcept"),
@@ -266,6 +277,26 @@ class XrayVpnService : VpnService() {
             )
         } catch (_: Exception) {
             null
+        }
+    }
+
+    private fun extractSocksFromConfig(configJson: String): Pair<String, String> {
+        return try {
+            val inbounds = org.json.JSONObject(configJson).getJSONArray("inbounds")
+            for (i in 0 until inbounds.length()) {
+                val inbound = inbounds.getJSONObject(i)
+                if (inbound.optString("tag") == "socks") {
+                    val accounts = inbound.optJSONObject("settings")
+                        ?.optJSONArray("accounts") ?: continue
+                    if (accounts.length() > 0) {
+                        val acc = accounts.getJSONObject(0)
+                        return acc.optString("user", "") to acc.optString("pass", "")
+                    }
+                }
+            }
+            "" to ""
+        } catch (_: Exception) {
+            "" to ""
         }
     }
 
@@ -599,6 +630,12 @@ class XrayVpnService : VpnService() {
                     log("warning", "tunInterface.close failed: ${e.message}")
                 }
                 tunInterface = null
+            }
+
+            // On explicit disconnect, remove the config file so credentials
+            // don't persist on disk between user sessions.
+            if (explicit) {
+                try { File(filesDir, "xray_config.json").delete() } catch (_: Exception) {}
             }
         } finally {
             // Always send final state — even if cleanup partially failed

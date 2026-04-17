@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../core/models/vpn_config.dart';
 import '../../core/services/config_storage_service.dart';
 import '../../core/services/subscription_service.dart';
@@ -124,8 +125,12 @@ class _ConfigsScreenState extends ConsumerState<ConfigsScreen> {
       case 'edit':
         await _editConfig(context, ref, config);
         break;
-      case 'copy':
       case 'share':
+        if (config.rawUri != null) {
+          await Share.share(config.rawUri!);
+        }
+        break;
+      case 'copy':
         if (config.rawUri != null) {
           await Clipboard.setData(ClipboardData(text: config.rawUri!));
           if (context.mounted) {

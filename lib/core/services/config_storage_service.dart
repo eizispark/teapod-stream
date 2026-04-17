@@ -1,6 +1,7 @@
 import 'dart:convert';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../models/vpn_config.dart';
+import 'storage_secure_service.dart';
+import 'storage_migration_service.dart';
 
 class Subscription {
   final String id;
@@ -47,26 +48,23 @@ class Subscription {
 }
 
 class ConfigStorageService {
-  static const _configsKey = 'vpn_configs';
-  static const _activeConfigKey = 'active_config_id';
-  static const _subscriptionsKey = 'subscriptions';
+  final _secure = StorageSecureService();
 
   // ─── Configs ───
 
   Future<List<VpnConfig>> loadConfigs() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList(_configsKey) ?? [];
-    return raw
-        .map((s) => VpnConfig.fromJson(jsonDecode(s) as Map<String, dynamic>))
+    await StorageMigrationService.runIfNeeded();
+    final raw = await _secure.readConfigsRaw();
+    if (raw == null || raw.isEmpty) return [];
+    final list = jsonDecode(raw) as List<dynamic>;
+    return list
+        .map((e) => VpnConfig.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 
   Future<void> saveConfigs(List<VpnConfig> configs) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
-      _configsKey,
-      configs.map((c) => jsonEncode(c.toJson())).toList(),
-    );
+    await _secure.writeConfigsRaw(
+        jsonEncode(configs.map((c) => c.toJson()).toList()));
   }
 
   Future<void> addConfig(VpnConfig config) async {
@@ -91,35 +89,29 @@ class ConfigStorageService {
   }
 
   Future<String?> loadActiveConfigId() async {
-    final prefs = await SharedPreferences.getInstance();
-    return prefs.getString(_activeConfigKey);
+    await StorageMigrationService.runIfNeeded();
+    return _secure.readActiveConfigId();
   }
 
   Future<void> saveActiveConfigId(String? id) async {
-    final prefs = await SharedPreferences.getInstance();
-    if (id == null) {
-      await prefs.remove(_activeConfigKey);
-    } else {
-      await prefs.setString(_activeConfigKey, id);
-    }
+    await _secure.writeActiveConfigId(id);
   }
 
   // ─── Subscriptions ───
 
   Future<List<Subscription>> loadSubscriptions() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getStringList(_subscriptionsKey) ?? [];
-    return raw
-        .map((s) => Subscription.fromJson(jsonDecode(s) as Map<String, dynamic>))
+    await StorageMigrationService.runIfNeeded();
+    final raw = await _secure.readSubscriptionsRaw();
+    if (raw == null || raw.isEmpty) return [];
+    final list = jsonDecode(raw) as List<dynamic>;
+    return list
+        .map((e) => Subscription.fromJson(e as Map<String, dynamic>))
         .toList();
   }
 
   Future<void> saveSubscriptions(List<Subscription> subs) async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.setStringList(
-      _subscriptionsKey,
-      subs.map((s) => jsonEncode(s.toJson())).toList(),
-    );
+    await _secure.writeSubscriptionsRaw(
+        jsonEncode(subs.map((s) => s.toJson()).toList()));
   }
 
   Future<void> addSubscription(Subscription sub) async {
@@ -154,7 +146,8 @@ class ConfigStorageService {
   }
 
   /// Get configs that belong to a subscription
-  Future<List<VpnConfig>> getConfigsForSubscription(String subscriptionId) async {
+  Future<List<VpnConfig>> getConfigsForSubscription(
+      String subscriptionId) async {
     final configs = await loadConfigs();
     return configs.where((c) => c.subscriptionId == subscriptionId).toList();
   }
