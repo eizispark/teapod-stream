@@ -55,6 +55,8 @@ class VpnNotifier extends Notifier<VpnState2> {
   Timer? _heartbeatTimer;
   int _heartbeatFailures = 0;
   int _heartbeatSocksPort = 0;
+  String _heartbeatUser = '';
+  String _heartbeatPassword = '';
   bool _heartbeatProxyOnly = false;
 
   @override
@@ -225,14 +227,38 @@ class VpnNotifier extends Notifier<VpnState2> {
         (data) {
           if (completer.isCompleted) return;
           if (phase == 0) {
-            if (data.length >= 2 && data[0] == 0x05 && data[1] == 0x00) {
-              phase = 1;
-              // CONNECT 1.1.1.1:53 via SOCKS5
-              socket!.add([0x05, 0x01, 0x00, 0x01, 1, 1, 1, 1, 0, 53]);
+            if (data.length >= 2 && data[0] == 0x05) {
+              if (data[1] == 0x00) {
+                // No auth required
+                phase = 2; // skip auth phase
+                socket!.add([0x05, 0x01, 0x00, 0x01, 1, 1, 1, 1, 0, 53]);
+              } else if (data[1] == 0x02) {
+                // Username/Password auth required
+                phase = 1;
+                final userBytes = _heartbeatUser.codeUnits;
+                final passBytes = _heartbeatPassword.codeUnits;
+                socket!.add([
+                  0x01, // Auth version
+                  userBytes.length,
+                  ...userBytes,
+                  passBytes.length,
+                  ...passBytes,
+                ]);
+              } else {
+                completer.complete(false); // Unsupported auth
+              }
             } else {
               completer.complete(false);
             }
           } else if (phase == 1) {
+             // Auth response
+             if (data.length >= 2 && data[0] == 0x01 && data[1] == 0x00) {
+                 phase = 2;
+                 socket!.add([0x05, 0x01, 0x00, 0x01, 1, 1, 1, 1, 0, 53]);
+             } else {
+                 completer.complete(false); // Auth failed
+             }
+          } else if (phase == 2) {
             completer.complete(
                 data.length >= 2 && data[0] == 0x05 && data[1] == 0x00);
           }
@@ -246,23 +272,30 @@ class VpnNotifier extends Notifier<VpnState2> {
         cancelOnError: true,
       );
 
-      // Send SOCKS5 greeting: version=5, 1 auth method, no-auth
-      socket.add([0x05, 0x01, 0x00]);
+      // Send SOCKS5 greeting: version=5, 2 auth methods (no-auth, user/pass)
+      socket.add([0x05, 0x02, 0x00, 0x02]);
 
       final ok = await completer.future.timeout(const Duration(seconds: 8));
       if (ok) {
         _heartbeatFailures = 0;
+        ref.read(logServiceProvider.notifier).add(VpnLogEntry(
+          timestamp: DateTime.now(),
+          level: LogLevel.debug,
+          message: 'Heartbeat check passed (SOCKS5 connect 1.1.1.1:53 OK)',
+          source: 'vpn',
+        ));
         return;
       }
       throw Exception('SOCKS5 probe failed');
     } catch (_) {
       _heartbeatFailures++;
       if (_heartbeatFailures >= 3 && state.isConnected) {
+        final failures = _heartbeatFailures;
         _stopHeartbeat();
         ref.read(logServiceProvider.notifier).add(VpnLogEntry(
           timestamp: DateTime.now(),
           level: LogLevel.warning,
-          message: 'Heartbeat failed $_heartbeatFailures times, reconnecting',
+          message: 'Heartbeat failed $failures times, reconnecting',
           source: 'vpn',
         ));
         await _reconnect();
@@ -276,7 +309,13 @@ class VpnNotifier extends Notifier<VpnState2> {
 
   Future<void> _reconnect() async {
     await disconnect();
-    await Future<void>.delayed(const Duration(milliseconds: 500));
+    
+    // Wait until fully disconnected (up to 15 seconds)
+    for (int i = 0; i < 150; i++) {
+        if (!state.isBusy && !state.isConnected) break;
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+    }
+    
     await connect();
   }
 
@@ -351,6 +390,8 @@ class VpnNotifier extends Notifier<VpnState2> {
       killSwitch: settings.killSwitchEnabled,
     );
     _heartbeatSocksPort = actualSocksPort;
+    _heartbeatUser = socksCredentials.user;
+    _heartbeatPassword = socksCredentials.password;
     _heartbeatProxyOnly = settings.proxyOnly;
 
     try {
