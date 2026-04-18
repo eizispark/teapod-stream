@@ -18,6 +18,7 @@ class VpnConfig {
   final String? sni;
   final String? wsPath;
   final String? wsHost;
+  final String? xhttpMode;
   final String? grpcServiceName;
   final String? fingerprint;
   final String? publicKey; // for Reality
@@ -48,6 +49,7 @@ class VpnConfig {
     this.sni,
     this.wsPath,
     this.wsHost,
+    this.xhttpMode,
     this.grpcServiceName,
     this.fingerprint,
     this.publicKey,
@@ -72,6 +74,7 @@ class VpnConfig {
     int? latencyMs,
     String? subscriptionId,
     String? rawUri,
+    String? xhttpMode,
   }) {
     return VpnConfig(
       id: id,
@@ -85,6 +88,7 @@ class VpnConfig {
       sni: sni,
       wsPath: wsPath,
       wsHost: wsHost,
+      xhttpMode: xhttpMode ?? this.xhttpMode,
       grpcServiceName: grpcServiceName,
       fingerprint: fingerprint,
       publicKey: publicKey,
@@ -117,6 +121,7 @@ class VpnConfig {
         'sni': sni,
         'wsPath': wsPath,
         'wsHost': wsHost,
+        'xhttpMode': xhttpMode,
         'grpcServiceName': grpcServiceName,
         'fingerprint': fingerprint,
         'publicKey': publicKey,
@@ -157,6 +162,7 @@ class VpnConfig {
         sni: json['sni'] as String?,
         wsPath: json['wsPath'] as String?,
         wsHost: json['wsHost'] as String?,
+        xhttpMode: json['xhttpMode'] as String?,
         grpcServiceName: json['grpcServiceName'] as String?,
         fingerprint: json['fingerprint'] as String?,
         publicKey: json['publicKey'] as String?,

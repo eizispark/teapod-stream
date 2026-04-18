@@ -50,6 +50,7 @@ class VlessParser {
         sni: params['sni'] ?? params['serverName'],
         wsPath: Uri.decodeComponent(params['path'] ?? '/'),
         wsHost: params['host'],
+        xhttpMode: params['mode'],
         grpcServiceName: params['serviceName'],
         fingerprint: params['fp'],
         publicKey: params['pbk'],
